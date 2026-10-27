@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 from urllib.parse import quote
 
-from .errors import PricingYamlUnavailableError, SpaceApiError, SpaceFeatureUnsupportedError
+from .errors import (
+    ContractChangedError,
+    PricingYamlUnavailableError,
+    SpaceApiError,
+    SpaceFeatureUnsupportedError,
+)
 from .types.models import (
     Contract,
     ContractPricings,
@@ -26,6 +31,7 @@ from .types.models import (
     EvaluationError,
     FeatureEvaluationResult,
     NewContractsPricing,
+    NovationPreview,
     PricingYaml,
     Subscription,
 )
@@ -88,6 +94,21 @@ def _quote_etag(etag: str) -> str:
     return f'"{etag}"'
 
 
+def _unquote_etag(etag: str) -> str:
+    return re.sub(r'^(W/)?"(.*)"$', r"\2", etag)
+
+
+def _response_headers(response: Any) -> Any:
+    return getattr(response, "headers", None) or {}
+
+
+def _decode(response: Any) -> Any:
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
 def _error_code(payload: Any) -> str | None:
     return payload.get("error") if isinstance(payload, dict) else None
 
@@ -125,13 +146,70 @@ def add_contract(contract_to_create: ContractToCreate) -> Operation[Contract | N
     return Operation("POST", "/contracts", json=contract_to_create.to_dict(), parse=parse)
 
 
-def update_contract_subscription(user_id: str, new_subscription: Subscription) -> Operation[Contract | None]:
+def update_contract_subscription(
+    user_id: str,
+    new_subscription: Subscription,
+    expected_contract_version: str | None = None,
+    keep_billing_period: bool = False,
+) -> Operation[Contract | None]:
+    headers: dict[str, str] | None = None
+    if expected_contract_version is not None:
+        headers = {"If-Match": _quote_etag(expected_contract_version)}
+
+    replace = _replace_one(user_id)
+
+    def parse(cache: "CacheModule", response: Any) -> Contract | None:
+        payload = _decode(response)
+        # Servers that send the version only as an ETag still fill it in.
+        etag = _response_headers(response).get("etag")
+        if isinstance(payload, dict) and payload.get("contractVersion") is None and etag:
+            payload = {**payload, "contractVersion": _unquote_etag(etag)}
+        return replace(cache, payload)
+
+    def on_refusal(cache: "CacheModule", error: SpaceApiError) -> None:
+        if error.status_code == 412:
+            # Whatever we hold for this user is known to be stale.
+            if cache.is_enabled():
+                cache.invalidate_user(user_id)
+            raise ContractChangedError.from_error(error, user_id, expected_contract_version)
+
+    # The path is left unescaped, as it always was for this call, so that
+    # callers relying on the old URL see no change.
     return Operation(
         "PUT",
-        f"/contracts/{user_id}",
+        f"/contracts/{user_id}{_novation_query(keep_billing_period)}",
         json=new_subscription.to_dict(),
-        parse=_replace_one(user_id),
+        headers=headers,
+        raw=True,
+        parse=parse,
+        on_refusal=on_refusal,
     )
+
+
+def preview_novation(
+    user_id: str,
+    new_subscription: Subscription,
+    keep_billing_period: bool = False,
+) -> Operation[NovationPreview]:
+    body = new_subscription.to_dict()
+    if not body.get("contractedServices"):
+        # Omitted means "keep the current versions or let the policy decide".
+        body.pop("contractedServices", None)
+
+    # A dry run writes nothing, so it leaves the cache alone.
+    def parse(_cache: "CacheModule", payload: Any) -> NovationPreview:
+        return NovationPreview.from_dict(payload if isinstance(payload, dict) else {})
+
+    return Operation(
+        "POST",
+        f"/contracts/{_segment(user_id)}/novation/preview{_novation_query(keep_billing_period)}",
+        json=body,
+        parse=parse,
+    )
+
+
+def _novation_query(keep_billing_period: bool) -> str:
+    return "?keepBillingPeriod=true" if keep_billing_period else ""
 
 
 def update_contract_subscription_by_group_id(

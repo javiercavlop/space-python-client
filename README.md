@@ -208,11 +208,12 @@ local registry. Supports `async with`.
 |---|---|
 | `get_contract(user_id)` | `Contract | None` |
 | `add_contract(contract_to_create)` | `Contract | None` |
-| `update_contract_subscription(user_id, new_subscription)` | `Contract | None` |
+| `update_contract_subscription(user_id, new_subscription, expected_contract_version=None, keep_billing_period=False)` | `Contract | None` |
 | `update_contract_subscription_by_group_id(group_id, new_subscription)` | `list[Contract] | None` |
 | `update_contract_usage_levels(user_id, service_name, usage_levels_novations)` | `Contract | None` |
 | `remove_contract(user_id)` | `None` |
 | `get_pricings(user_id)` | `ContractPricings` |
+| `preview_novation(user_id, new_subscription, keep_billing_period=False)` | `NovationPreview` |
 
 Java-style aliases are also available (`getContract`, `addContract`, etc.).
 
@@ -251,6 +252,50 @@ if again.not_modified:
 	...  # reuse pricing.yaml
 ```
 
+### Changing a subscription safely
+
+Preview first, then apply with the `contract_version` the preview was computed
+on. If anything changed the contract in between, Space refuses with 412 and the
+client raises `ContractChangedError` instead of overwriting it:
+
+```python
+from space_client import ContractChangedError
+from space_client.types import NovationErrorCode, Subscription
+
+change = Subscription(
+	subscription_plans={"acme": "growth"},
+	subscription_add_ons={"acme": {"extraStorage": 2}},
+)  # contracted_services left empty: keep the versions or let the policy decide
+
+preview = client.contracts.preview_novation("user-123", change, keep_billing_period=True)
+if not preview.valid:
+	for error in preview.errors:
+		if error.code == NovationErrorCode.ADDON_NOT_AVAILABLE:
+			...
+		print(error.code, error.service, error.path, error.message)
+else:
+	print(preview.effective, preview.version_changes, preview.usage_warnings)
+	try:
+		client.contracts.update_contract_subscription(
+			"user-123",
+			preview.effective,
+			expected_contract_version=preview.contract_version,
+			keep_billing_period=True,
+		)
+	except ContractChangedError as changed:
+		print("Changed meanwhile; current version is", changed.contract_version)
+```
+
+- `preview_novation` writes nothing and leaves the cache alone. An invalid
+  change is an answer (`valid=False`, `errors`), not an exception. Unknown error
+  codes are kept as strings.
+- `expected_contract_version` is sent as `If-Match`. Without it the update is
+  unconditional, exactly as before.
+- `keep_billing_period=True` sends `?keepBillingPeriod=true`: history is still
+  recorded but the billing period is not restarted.
+- `Contract.contract_version` is filled from the body or, failing that, from the
+  `ETag` of the update response. It is `None` on Space versions without it.
+
 `get_yaml` raises `PricingYamlUnavailableError` (a `SpaceApiError`) when Space
 knows the version but no longer has its original file. `get_pricings` is never
 served from cache: its `contract_version` matters only while it is current.
@@ -280,6 +325,8 @@ Main model classes are exported from `space_client.types`:
 - `CacheOptions`, `CacheType`, `ExternalCacheConfig`, `RedisConfig`
 - `Contract`, `ContractToCreate`, `Subscription`
 - `PricingYaml`, `ContractPricings`, `ContractServicePricing`, `NewContractsPricing`
+- `NovationPreview`, `NovationError`, `NovationErrorCode`, `NovationVersionChange`,
+  `NovationUsageWarning`, `NovationBillingPeriod`
 - `FeatureEvaluationResult`, `EvaluationError`
 - `BillingPeriod`, `BillingPeriodToCreate`, `ContractHistoryEntry`, `UsageLevel`, `UserContact`
 - `SpaceEvent`
@@ -357,6 +404,11 @@ client.connect()
   the connected Space lacks a feature the call depends on; `capability` names
   it with its `X-Space-Capabilities` token (e.g. `pricing-yaml` when `get_yaml`
   receives JSON from a Space that ignores `format=yaml`).
+- `contracts.update_contract_subscription(..., expected_contract_version=...)`
+  raises `ContractChangedError`, a subclass of `SpaceApiError`, when the
+  contract changed since that version (HTTP 412). It carries `user_id`,
+  `expected_contract_version` and the current `contract_version`, and the
+  user's cached entries are invalidated.
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 

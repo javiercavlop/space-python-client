@@ -4,7 +4,13 @@ from typing import Any
 
 from .. import _operations as operations
 from .._result import Result
-from ..types.models import Contract, ContractPricings, ContractToCreate, Subscription
+from ..types.models import (
+    Contract,
+    ContractPricings,
+    ContractToCreate,
+    NovationPreview,
+    Subscription,
+)
 from ._runner import AsyncRunner, SyncRunner
 
 
@@ -42,18 +48,66 @@ class _ContractCalls:
         return self._run(operations.add_contract(contract_to_create))
 
     def update_contract_subscription(
-        self, user_id: str, new_subscription: Subscription
+        self,
+        user_id: str,
+        new_subscription: Subscription,
+        expected_contract_version: str | None = None,
+        keep_billing_period: bool = False,
     ) -> Result[Contract | None]:
-        """Update subscription for a single user.
+        """Update subscription for a single user (novation).
 
         Args:
             user_id (str): User identifier.
             new_subscription (Subscription): Subscription update payload.
+            expected_contract_version (str | None): The ``contract_version`` the
+                change was computed on (from ``get_contract``, ``get_pricings`` or
+                ``preview_novation``). Sent as ``If-Match``; if the contract
+                changed meanwhile Space answers 412 and this raises
+                :class:`~space_client.errors.ContractChangedError`. Without it the
+                update is unconditional, as before.
+            keep_billing_period (bool): Keep the current billing period instead of
+                restarting it (``?keepBillingPeriod=true``). Default: restart.
 
         Returns:
             Contract | None: Updated contract on success, otherwise None.
+
+        Raises:
+            ContractChangedError: ``expected_contract_version`` no longer matches.
+            SpaceApiError: Any other refusal.
         """
-        return self._run(operations.update_contract_subscription(user_id, new_subscription))
+        return self._run(
+            operations.update_contract_subscription(
+                user_id, new_subscription, expected_contract_version, keep_billing_period
+            )
+        )
+
+    def preview_novation(
+        self,
+        user_id: str,
+        new_subscription: Subscription,
+        keep_billing_period: bool = False,
+    ) -> Result[NovationPreview]:
+        """Preview a novation without applying it.
+
+        Calls ``POST /contracts/{userId}/novation/preview``. Space runs the same
+        policy and validation as :meth:`update_contract_subscription` and writes
+        nothing. An invalid change is reported as ``valid=False`` with
+        ``errors``, not raised. Leave ``contracted_services`` empty to keep the
+        current versions or let the SPHERE policy decide.
+
+        Args:
+            user_id (str): User identifier.
+            new_subscription (Subscription): The candidate subscription.
+            keep_billing_period (bool): Preview keeping the current billing period.
+
+        Returns:
+            NovationPreview: Validity, errors, the effective subscription,
+            version changes, usage warnings, the resulting billing period and
+            the current ``contract_version``.
+        """
+        return self._run(
+            operations.preview_novation(user_id, new_subscription, keep_billing_period)
+        )
 
     def update_contract_subscription_by_group_id(
         self,
@@ -131,6 +185,7 @@ class _ContractCalls:
     updateContractUsageLevels = update_contract_usage_levels
     removeContract = remove_contract
     getPricings = get_pricings
+    previewNovation = preview_novation
 
 
 class ContractModule(_ContractCalls, SyncRunner):

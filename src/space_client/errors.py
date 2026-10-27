@@ -143,3 +143,52 @@ class PricingYamlUnavailableError(SpaceApiError):
             service_name=service_name,
             pricing_version=pricing_version,
         )
+
+
+class ContractChangedError(SpaceApiError):
+    """The contract changed since the version the caller computed its change on.
+
+    Raised by ``contracts.update_contract_subscription`` when an
+    ``expected_contract_version`` was given and Space answered
+    ``412 {"error": "CONTRACT_CHANGED", "contractVersion": "<current>"}``:
+    someone else novated, renewed or edited the contract in the meantime.
+    Re-read it (or preview again), show the customer the new situation and ask
+    them to confirm; ``contract_version`` is the version to send next time.
+    """
+
+    code = "CONTRACT_CHANGED"
+
+    def __init__(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        payload: Any = None,
+        user_id: str = "",
+        expected_contract_version: str | None = None,
+        contract_version: str | None = None,
+    ):
+        super().__init__(status_code, method, path, payload)
+        self.user_id = user_id
+        self.expected_contract_version = expected_contract_version
+        self.contract_version = contract_version
+        message = (
+            f"The contract of user {user_id} changed (expected "
+            f"{expected_contract_version or 'unknown'}, current {contract_version or 'unknown'})"
+        )
+        self.args = (message,)
+
+    @classmethod
+    def from_error(
+        cls, error: SpaceApiError, user_id: str, expected_contract_version: str | None
+    ) -> "ContractChangedError":
+        payload = error.payload if isinstance(error.payload, dict) else {}
+        return cls(
+            error.status_code,
+            error.method,
+            error.path,
+            error.payload,
+            user_id=user_id,
+            expected_contract_version=expected_contract_version,
+            contract_version=payload.get("contractVersion"),
+        )

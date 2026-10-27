@@ -1,5 +1,6 @@
 from .async_space_client import AsyncSpaceClient
 from .errors import (
+    ContractChangedError,
     PricingYamlUnavailableError,
     SpaceApiError,
     SpaceConnectionError,
@@ -12,6 +13,7 @@ from .types.space_connection_options import SpaceConnectionOptions
 
 __all__ = [
     "AsyncSpaceClient",
+    "ContractChangedError",
     "PricingYamlUnavailableError",
     "SpaceApiError",
     "SpaceConnectionError",

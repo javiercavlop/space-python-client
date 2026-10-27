@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any
 
 
@@ -225,6 +226,8 @@ class Contract:
     subscription_plans: dict[str, str] = field(default_factory=dict)
     subscription_add_ons: dict[str, dict[str, int]] = field(default_factory=dict)
     history: list[ContractHistoryEntry] = field(default_factory=list)
+    contract_version: str | None = None
+    """Opaque version (also the ``ETag``); None on Space versions without it."""
 
     @property
     def user_id(self) -> str | None:
@@ -267,6 +270,7 @@ class Contract:
             subscription_plans=dict(payload.get("subscriptionPlans", {})),
             subscription_add_ons=dict(payload.get("subscriptionAddOns", {})),
             history=[ContractHistoryEntry.from_dict(item) for item in history_raw],
+            contract_version=payload.get("contractVersion"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -293,6 +297,7 @@ class Contract:
             "subscriptionPlans": self.subscription_plans,
             "subscriptionAddOns": self.subscription_add_ons,
             "history": [asdict(entry) for entry in self.history],
+            "contractVersion": self.contract_version,
         }
 
 
@@ -427,6 +432,138 @@ class NewContractsPricing:
         )
 
 
+class NovationErrorCode(str, Enum):
+    """Stable codes of novation validation errors.
+
+    ``NovationError.code`` is kept as the string Space sent, so a code added
+    later still arrives; compare it with these members (they are strings).
+    """
+
+    PLAN_NOT_FOUND = "PLAN_NOT_FOUND"
+    ADDON_NOT_FOUND = "ADDON_NOT_FOUND"
+    ADDON_NOT_AVAILABLE = "ADDON_NOT_AVAILABLE"
+    ADDON_DEPENDENCY_MISSING = "ADDON_DEPENDENCY_MISSING"
+    ADDON_EXCLUDED = "ADDON_EXCLUDED"
+    QUANTITY_OUT_OF_RANGE = "QUANTITY_OUT_OF_RANGE"
+    VERSION_NOT_FOUND = "VERSION_NOT_FOUND"
+    VERSION_ARCHIVED = "VERSION_ARCHIVED"
+    PRIVATE_PLAN = "PRIVATE_PLAN"
+    PRIVATE_ADDON = "PRIVATE_ADDON"
+
+
+@dataclass
+class NovationError:
+    code: str
+    service: str = ""
+    message: str = ""
+    path: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NovationError":
+        payload = data or {}
+        return cls(
+            code=str(payload.get("code", "")),
+            service=str(payload.get("service", "")),
+            message=str(payload.get("message", "")),
+            path=payload.get("path"),
+        )
+
+
+@dataclass
+class NovationVersionChange:
+    """A service whose pricing version would change, and why (e.g. ``policy:all_last``)."""
+
+    from_version: str
+    to_version: str
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NovationVersionChange":
+        payload = data or {}
+        return cls(
+            from_version=str(payload.get("from", "")),
+            to_version=str(payload.get("to", "")),
+            reason=str(payload.get("reason", "")),
+        )
+
+
+@dataclass
+class NovationUsageWarning:
+    """A usage limit that would end up below current consumption (not an error)."""
+
+    service: str
+    usage_limit: str
+    consumed: float
+    new_limit: float
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NovationUsageWarning":
+        payload = data or {}
+        return cls(
+            service=str(payload.get("service", "")),
+            usage_limit=str(payload.get("usageLimit", "")),
+            consumed=payload.get("consumed", 0),
+            new_limit=payload.get("newLimit", 0),
+        )
+
+
+@dataclass
+class NovationBillingPeriod:
+    start_date: str | None = None
+    end_date: str | None = None
+    restarts: bool = True
+    """False when ``keep_billing_period`` keeps the current period."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NovationBillingPeriod":
+        payload = data or {}
+        return cls(
+            start_date=payload.get("startDate"),
+            end_date=payload.get("endDate"),
+            restarts=bool(payload.get("restarts", True)),
+        )
+
+
+@dataclass
+class NovationPreview:
+    """What a novation with the same body would do; Space writes nothing.
+
+    Feature/limit diffs and prices are not computed by Space.
+    """
+
+    valid: bool
+    errors: list[NovationError] = field(default_factory=list)
+    effective: Subscription = field(default_factory=lambda: Subscription())
+    version_changes: dict[str, NovationVersionChange] = field(default_factory=dict)
+    usage_warnings: list[NovationUsageWarning] = field(default_factory=list)
+    billing_period: NovationBillingPeriod = field(default_factory=NovationBillingPeriod)
+    contract_version: str | None = None
+    """Pass it as ``expected_contract_version`` when applying the change."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NovationPreview":
+        payload = data or {}
+        effective = payload.get("effective") or {}
+        return cls(
+            valid=bool(payload.get("valid", False)),
+            errors=[NovationError.from_dict(item) for item in payload.get("errors") or []],
+            effective=Subscription(
+                contracted_services=dict(effective.get("contractedServices") or {}),
+                subscription_plans=dict(effective.get("subscriptionPlans") or {}),
+                subscription_add_ons=dict(effective.get("subscriptionAddOns") or {}),
+            ),
+            version_changes={
+                name: NovationVersionChange.from_dict(item)
+                for name, item in dict(payload.get("versionChanges") or {}).items()
+            },
+            usage_warnings=[
+                NovationUsageWarning.from_dict(item) for item in payload.get("usageWarnings") or []
+            ],
+            billing_period=NovationBillingPeriod.from_dict(payload.get("billingPeriod")),
+            contract_version=payload.get("contractVersion"),
+        )
+
+
 __all__ = [
     "BillingPeriod",
     "BillingPeriodToCreate",
@@ -438,6 +575,12 @@ __all__ = [
     "EvaluationError",
     "FeatureEvaluationResult",
     "NewContractsPricing",
+    "NovationBillingPeriod",
+    "NovationError",
+    "NovationErrorCode",
+    "NovationPreview",
+    "NovationUsageWarning",
+    "NovationVersionChange",
     "PricingYaml",
     "Subscription",
     "UsageLevel",
