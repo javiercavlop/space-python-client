@@ -53,6 +53,13 @@ Optional Redis support:
 pip install "space-python-client[redis]"
 ```
 
+Optional verification of pricing tokens (PyJWT with `cryptography`, see
+[Verifying pricing tokens](#verifying-pricing-tokens)):
+
+```bash
+pip install "space-python-client[verify]"
+```
+
 ## Quick Start in 5 Minutes
 
 ```python
@@ -354,8 +361,10 @@ served from cache: its `contract_version` matters only while it is current.
 | `evaluate(user_id, feature_id, expected_consumption=None, details=False, server=False)` | `FeatureEvaluationResult` |
 | `revert_evaluation(user_id, feature_id, revert_to_latest=True)` | `bool` |
 | `generate_user_pricing_token(user_id)` | `str | None` |
+| `verify_pricing_token(token, organization_id=None, issuer=None, leeway=None)` | `PricingTokenPayload` |
 
-Java-style aliases are also available (`revertEvaluation`, `generateUserPricingToken`).
+Java-style aliases are also available (`revertEvaluation`, `generateUserPricingToken`,
+`verifyPricingToken`).
 
 ## Data Models
 
@@ -518,6 +527,62 @@ When a token is checked on the server side, also compare `organization_id` (or
 `aud`) with your organization: the same userId can exist in another
 organization of the same Space.
 
+### Verifying pricing tokens
+
+Space versions with the capability `pricing-token-jwks` sign pricing tokens
+with ES256 and publish the public keys at
+`GET {url}/api/v1/.well-known/jwks.json` (no API key). A token that comes back
+to your backend (from a browser, a queue, another service) can then be verified
+with public material only. It needs the `verify` extra.
+
+```python
+payload = client.features.verify_pricing_token(token, organization_id="my-org-id")
+user_id = pricing_token_user_id(payload)
+```
+
+or, without a client:
+
+```python
+from space_client import PricingTokenVerifier
+
+verifier = PricingTokenVerifier("https://space.example.com", organization_id="my-org-id")
+payload = verifier.verify(token)
+```
+
+`AsyncPricingTokenVerifier` takes the same arguments and its `verify` is
+awaited; `AsyncSpaceClient.features.verify_pricing_token` is awaited too.
+
+What is checked:
+
+- The signature is ES256 by a key of the JWKS, chosen by the token's `kid`.
+  Any other `alg` (`HS256`, `none`, ...) is rejected, and so is a token with a
+  `jwk`, `jku`, `x5u` or `x5c` header: keys only come from the JWKS URL of your
+  Space.
+- `exp` is required and checked (`leeway`, in seconds, default 0).
+- `iss` equals `issuer` (the `JWT_ISSUER` of your Space, `space` by default).
+- `aud` and `organizationId` equal the expected organization. It is required:
+  pass `organization_id` to the call or to the verifier; the client uses its own
+  `organization_id` option when the call names none. A userId is only unique
+  within an organization, so a valid signature alone does not tell you the token
+  is for one of your users.
+
+The JWKS is cached for the `max-age` of its response (Space sends 5 minutes;
+5 minutes also without `Cache-Control`, nothing with `no-store`/`no-cache`) and
+fetched again when a token names a `kid` it does not know, at most once per
+`refetch_cooldown` (default 30 s), so key rotations need nothing on your side.
+Keep one verifier (or one client) and reuse it.
+
+Errors, all `PricingTokenVerificationError` (a `SpaceError`) with a `code`:
+`PricingTokenSignatureError` (forged or tampered token),
+`PricingTokenExpiredError` (`expired_at`), `PricingTokenAudienceError` (another
+organization), `PricingTokenIssuerError`, `PricingTokenUnknownKeyError` (`kid`
+not published, e.g. a removed key), and the base class with
+`PRICING_TOKEN_INVALID` (malformed token, wrong `alg`, forbidden header,
+missing claims) or `PRICING_TOKEN_JWKS_UNAVAILABLE` (the JWKS could not be
+fetched). A Space that does not publish its keys (older versions, or one in the
+deprecated `PRICING_TOKEN_ALG=HS256` mode) raises `SpaceFeatureUnsupportedError`
+with `capability == "pricing-token-jwks"`.
+
 ## Error Handling
 
 - Factory validation raises `ValueError` for invalid input.
@@ -541,6 +606,9 @@ organization of the same Space.
   implement the option (`written=False`, nothing sent) or applied the change
   without honouring it (`written=True`, `contract` set). An explicit empty
   `expected_contract_version` raises `ValueError`.
+- `features.verify_pricing_token(...)` and `PricingTokenVerifier.verify(...)`
+  raise `PricingTokenVerificationError` or one of its subclasses (see
+  [Verifying pricing tokens](#verifying-pricing-tokens)).
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 

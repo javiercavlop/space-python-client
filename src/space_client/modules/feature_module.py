@@ -4,7 +4,9 @@ from typing import Any
 
 from .. import _operations as operations
 from .._result import Result
+from ..pricing_token_verifier import AsyncPricingTokenVerifier, PricingTokenVerifier
 from ..types.models import FeatureEvaluationResult
+from ..types.pricing_token import PricingTokenPayload
 from ._runner import AsyncRunner, SyncRunner
 
 
@@ -75,8 +77,60 @@ class _FeatureCalls:
     generateUserPricingToken = generate_user_pricing_token
 
 
+_VERIFY_DOC = """Verify a pricing token with the public keys of this Space.
+
+        Checks the ES256 signature by a key of the JWKS Space publishes
+        (capability ``pricing-token-jwks``), ``exp``, ``iss`` and
+        ``aud``/``organizationId``, and returns the payload. Use it for tokens that
+        come back from a browser or another service; no API key is sent. The JWKS
+        is cached by the client (see :class:`~space_client.PricingTokenVerifier`).
+
+        Args:
+            token (str): The pricing token.
+            organization_id (str | None): The organization the token must be
+                issued for. Defaults to the ``organization_id`` of the client; one
+                of the two is required.
+            issuer (str | None): The expected ``iss``. Default ``space``.
+            leeway (float | None): Tolerance for ``exp``, in seconds. Default 0.
+
+        Returns:
+            PricingTokenPayload: The verified claims.
+
+        Raises:
+            ValueError: Without an organization.
+            PricingTokenVerificationError: Or a subclass, when the token cannot be trusted.
+            SpaceFeatureUnsupportedError: When Space does not publish its keys.
+        """
+
+
 class FeatureModule(_FeatureCalls, SyncRunner):
     """Feature operations over the synchronous client."""
+
+    _verifier: PricingTokenVerifier | None = None
+
+    def verify_pricing_token(
+        self,
+        token: str,
+        organization_id: str | None = None,
+        issuer: str | None = None,
+        leeway: float | None = None,
+    ) -> PricingTokenPayload:
+        if self._verifier is None:
+            client = self._space_client
+            self._verifier = PricingTokenVerifier(
+                jwks_url=f"{client.get_http_url()}/.well-known/jwks.json",
+                http_client=client._http_client,
+                timeout=client.get_timeout() / 1000,
+            )
+        return self._verifier.verify(
+            token,
+            organization_id=organization_id or self._space_client._organization_id,
+            issuer=issuer,
+            leeway=leeway,
+        )
+
+    verify_pricing_token.__doc__ = _VERIFY_DOC
+    verifyPricingToken = verify_pricing_token
 
 
 class AsyncFeatureModule(_FeatureCalls, AsyncRunner):
@@ -85,3 +139,29 @@ class AsyncFeatureModule(_FeatureCalls, AsyncRunner):
     Same methods and same arguments as :class:`FeatureModule`; every one of them
     must be awaited.
     """
+
+    _verifier: AsyncPricingTokenVerifier | None = None
+
+    async def verify_pricing_token(
+        self,
+        token: str,
+        organization_id: str | None = None,
+        issuer: str | None = None,
+        leeway: float | None = None,
+    ) -> PricingTokenPayload:
+        if self._verifier is None:
+            client = self._space_client
+            self._verifier = AsyncPricingTokenVerifier(
+                jwks_url=f"{client.get_http_url()}/.well-known/jwks.json",
+                http_client=client._http_client,
+                timeout=client.get_timeout() / 1000,
+            )
+        return await self._verifier.verify(
+            token,
+            organization_id=organization_id or self._space_client._organization_id,
+            issuer=issuer,
+            leeway=leeway,
+        )
+
+    verify_pricing_token.__doc__ = _VERIFY_DOC
+    verifyPricingToken = verify_pricing_token

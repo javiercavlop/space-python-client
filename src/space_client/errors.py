@@ -192,3 +192,72 @@ class ContractChangedError(SpaceApiError):
             expected_contract_version=expected_contract_version,
             contract_version=payload.get("contractVersion"),
         )
+
+
+class PricingTokenVerificationError(SpaceError):
+    """A pricing token cannot be trusted.
+
+    Raised by ``PricingTokenVerifier.verify`` (and ``features.verify_pricing_token``).
+    The subclasses name the usual reasons; this class itself is used, with
+    ``code``:
+
+    * ``PRICING_TOKEN_INVALID``: a malformed token, an algorithm other than
+      ES256 (``HS256``, ``none``...), a ``jwk``/``jku``/``x5u``/``x5c`` header,
+      or a missing or invalid claim;
+    * ``PRICING_TOKEN_JWKS_UNAVAILABLE``: the JWKS could not be fetched.
+
+    The underlying error, if any, is the ``__cause__``.
+    """
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+class PricingTokenSignatureError(PricingTokenVerificationError):
+    """The signature does not match the published key the token names."""
+
+    def __init__(self) -> None:
+        super().__init__("PRICING_TOKEN_SIGNATURE_INVALID", "The pricing token signature is invalid")
+
+
+class PricingTokenExpiredError(PricingTokenVerificationError):
+    """The token expired (``exp``, after the leeway). ``expired_at`` is when."""
+
+    def __init__(self, expired_at: Any = None) -> None:
+        self.expired_at = expired_at
+        super().__init__("PRICING_TOKEN_EXPIRED", "The pricing token has expired")
+
+
+class PricingTokenAudienceError(PricingTokenVerificationError):
+    """The token was issued for another organization (``aud`` or ``organizationId``)."""
+
+    def __init__(self, expected: str, actual: Any = None) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            "PRICING_TOKEN_WRONG_AUDIENCE",
+            f"The pricing token was not issued for organization {expected}",
+        )
+
+
+class PricingTokenIssuerError(PricingTokenVerificationError):
+    """The token was issued by another server (``iss``)."""
+
+    def __init__(self, expected: str, actual: Any = None) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__("PRICING_TOKEN_WRONG_ISSUER", f"The pricing token was not issued by {expected}")
+
+
+class PricingTokenUnknownKeyError(PricingTokenVerificationError):
+    """The token names a ``kid`` SPACE does not publish, even after fetching the keys again.
+
+    A key that was removed (rotation, leaked key) or a token SPACE did not sign.
+    """
+
+    def __init__(self, kid: str) -> None:
+        self.kid = kid
+        super().__init__(
+            "PRICING_TOKEN_UNKNOWN_KID", f'SPACE does not publish the key "{kid}" of this pricing token'
+        )
