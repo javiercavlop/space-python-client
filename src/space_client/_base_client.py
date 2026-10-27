@@ -11,9 +11,11 @@ request is sent, and how the socket is opened.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from .errors import SpaceApiError
+from .event_id_window import EventIdWindow
+from .types.event_details import EventDeduplicationOptions, EventDetails, ResyncInfo
 from .types.space_connection_options import SpaceConnectionOptions
 from .types.space_event import SpaceEvent
 
@@ -35,6 +37,16 @@ def _read_body(response) -> Any:
 
 def _now() -> float:
     return time.monotonic()
+
+
+def _event_id_window(option: EventDeduplicationOptions | bool | None) -> EventIdWindow | None:
+    if option is None or option is True:
+        return EventIdWindow()
+    if option is False:
+        return None
+    if not option.enabled:
+        return None
+    return EventIdWindow(max_entries=option.max_entries, window_seconds=option.window_seconds)
 
 
 PRICINGS_NAMESPACE = "/pricings"
@@ -59,6 +71,7 @@ class BaseSpaceClient:
         SpaceEvent.PRICING_ARCHIVED.value,
         SpaceEvent.PRICING_ACTIVED.value,
         SpaceEvent.SERVICE_DISABLED.value,
+        SpaceEvent.RESYNC.value,
         SpaceEvent.ERROR.value,
         *_CONTRACT_EVENTS,
     }
@@ -94,6 +107,10 @@ class BaseSpaceClient:
         # The namespaces the socket was last connected with: adding one to a
         # python-socketio connection means connecting again.
         self._socket_namespaces: list[str] = []
+        # The eventIds seen recently, shared by both namespaces (None: off).
+        self._event_ids = _event_id_window(getattr(options, "event_deduplication", True))
+        # Whether each namespace connected before, to tell a reconnection.
+        self._connected_before = {"pricings": False, "contracts": False}
 
     # -- events ------------------------------------------------------------
 
@@ -103,15 +120,18 @@ class BaseSpaceClient:
             callback = self._callbacks.get(SpaceEvent.SYNCHRONIZED.value)
             if callback is not None:
                 callback(None)
+            self._emit_resync("pricings")
 
         @self._socket.on("message", namespace="/pricings")
         def _on_message(data: Any) -> None:
             if not isinstance(data, dict):
                 return
             code = str(data.get("code", "")).lower()
-            details = data.get("details")
             if code in self._CONTRACT_EVENTS:
                 # Contract events come only from the authenticated namespace.
+                return
+            accepted, details = self._accept_event(data)
+            if not accepted:
                 return
             callback = self._callbacks.get(code)
             if callback is not None:
@@ -123,12 +143,22 @@ class BaseSpaceClient:
             if callback is not None:
                 callback(error)
 
+        @self._socket.on("connect", namespace=CONTRACTS_NAMESPACE)
+        def _on_contract_connect() -> None:
+            if self._connected_before["contracts"] and self.cache is not None:
+                # Contract events sent while disconnected are lost, so what
+                # the cache holds for any user may be stale.
+                self.cache.invalidate_all_users()
+            self._emit_resync("contracts")
+
         @self._socket.on("message", namespace=CONTRACTS_NAMESPACE)
         def _on_contract_message(data: Any) -> None:
             if not isinstance(data, dict):
                 return
             code = str(data.get("code", "")).lower()
-            details = data.get("details")
+            accepted, details = self._accept_event(data)
+            if not accepted:
+                return
             # Whatever we cached for that user is stale now; drop it before
             # the callback runs, so a callback that re-reads gets fresh data.
             user_id = details.get("userId") if isinstance(details, dict) else None
@@ -145,6 +175,41 @@ class BaseSpaceClient:
             callback = self._callbacks.get(SpaceEvent.ERROR.value)
             if callback is not None:
                 callback(error)
+
+    def _accept_event(self, data: dict[str, Any]) -> tuple[bool, Any]:
+        """Whether to deliver an event, and the details to deliver.
+
+        A repeat of an ``eventId`` seen in the deduplication window is
+        dropped; an event without ``eventId`` (older Space) always passes.
+        Dict details become :class:`EventDetails`, which carry ``event_id`` and
+        ``occurred_at``.
+        """
+        event_id = data.get("eventId")
+        if not isinstance(event_id, str) or not event_id:
+            event_id = None
+        if (
+            event_id is not None
+            and self._event_ids is not None
+            and not self._event_ids.accept(event_id)
+        ):
+            return False, None
+        details = data.get("details")
+        if isinstance(details, dict):
+            occurred_at = data.get("occurredAt")
+            details = EventDetails(
+                details,
+                code=str(data.get("code", "")),
+                event_id=event_id,
+                raw_occurred_at=occurred_at if isinstance(occurred_at, str) else None,
+            )
+        return True, details
+
+    def _emit_resync(self, namespace: Literal["pricings", "contracts"]) -> None:
+        info = ResyncInfo(namespace=namespace, reconnect=self._connected_before[namespace])
+        self._connected_before[namespace] = True
+        callback = self._callbacks.get(SpaceEvent.RESYNC.value)
+        if callback is not None:
+            callback(info)
 
     def _has_contract_listeners(self) -> bool:
         return any(event in self._callbacks for event in self._CONTRACT_EVENTS)
@@ -190,10 +255,16 @@ class BaseSpaceClient:
             event (str): Event name. Supported values include synchronized,
                 pricing_created, pricing_archived, pricing_actived,
                 service_disabled, contract_created, contract_novated,
-                contract_deleted, contract_renewed, and error. Contract events
-                are received on the authenticated ``/contracts`` namespace, only
-                for the API key's organisation.
+                contract_deleted, contract_renewed, resync, and error. Contract
+                events are received on the authenticated ``/contracts``
+                namespace, only for the API key's organisation. ``resync``
+                fires each time a namespace connects, with a
+                :class:`ResyncInfo`; after a reconnection, re-read the
+                contracts you hold, since Space does not replay events.
             callback (Callable[[Any], None]): Function invoked with event payload.
+                Pricing and contract listeners get :class:`EventDetails` (the
+                ``details`` dict plus ``event_id`` and ``occurred_at``); a
+                repeated ``eventId`` is not delivered again.
 
         Returns:
             None: Listener registration updates internal callback registry.

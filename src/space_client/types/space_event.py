@@ -11,6 +11,7 @@ class SpaceEvent(str, Enum):
     CONTRACT_NOVATED = "contract_novated"
     CONTRACT_DELETED = "contract_deleted"
     CONTRACT_RENEWED = "contract_renewed"
+    RESYNC = "resync"
     ERROR = "error"
 
     @classmethod

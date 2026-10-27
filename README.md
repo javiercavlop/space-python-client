@@ -421,6 +421,7 @@ Supported event names:
 - `pricing_actived`
 - `service_disabled`
 - `contract_created`, `contract_novated`, `contract_deleted`, `contract_renewed`
+- `resync` (each time a namespace connects; see [Delivery guarantees](#delivery-guarantees))
 - `error`
 
 Example:
@@ -467,6 +468,91 @@ client.on("contract_novated", on_novated)
 - A key Space refuses on `/contracts` is reported to the `error` listener.
 - Removing the last contract listener does not close the namespace; its events
   are simply dropped until a listener is registered again.
+
+### Event ids and occurred_at
+
+Pricing and contract listeners receive `EventDetails`: the `details` dict Space
+sent, with the event's own fields as attributes.
+
+```python
+from space_client.types import EventDetails
+
+
+def on_novated(details: EventDetails):
+	details["userId"]        # the details, as before
+	details.code             # "CONTRACT_NOVATED"
+	details.event_id         # "019a2a6b-7c1e-7d3f-9b2a-5c4e8f1a2b3c", the same in every copy
+	details.occurred_at      # datetime (UTC): when Space stored the change
+	details.raw_occurred_at  # "2026-10-27T10:00:00.123Z", as sent
+```
+
+Space sends `eventId` and `occurredAt` from the version that advertises
+`contract-event-ids` in `X-Space-Capabilities`. With an older Space,
+`event_id` and `occurred_at` are `None` (`occurred_at` is also `None` if the
+value is not a valid date).
+
+### Delivery guarantees
+
+Space events are hints that something changed, not a log of the changes:
+
+- **At most once per connection, no replay.** An event goes to the connections
+  open when it is emitted. While the client is disconnected or reconnecting,
+  events are lost, and Space does not resend them.
+- **Repeats are possible.** A consumer with several connections gets one copy
+  per connection, all with the same `eventId`. The client drops a repeated
+  `eventId` before invalidating the cache or calling your listener. It
+  remembers the last 10,000 ids for up to 10 minutes (both namespaces share the
+  window); events without `eventId` are always delivered. Each client has its
+  own window, so two clients (or two replicas of your backend) each get their
+  copy, which is what each needs to refresh its own cache.
+- **No ordering.** Events may arrive in another order than the changes were
+  stored. Never order events by `event_id` (compare it for equality only), and
+  do not compare `occurred_at` across Space instances, whose clocks may differ.
+  `contractVersion` is a hash, not a counter.
+
+So treat a contract event as a reason to re-read the contract
+(`client.contracts.get_contract(user_id)`) and compare its `contractVersion`
+with the one you hold: unchanged means nothing to do, and a 404
+(`SpaceApiError`) means it was deleted. A late, repeated or out-of-order event then costs one read and changes
+nothing.
+
+After a reconnection, re-read the contracts you hold, because anything that
+changed while the client was disconnected was not announced. The `resync` event
+tells you when. It receives a `ResyncInfo(namespace, reconnect)`: `namespace`
+is `"pricings"` or `"contracts"`, and `reconnect` is `False` on the
+namespace's first connection and `True` after that. When `/contracts`
+reconnects, the client first invalidates the cached contracts, evaluations and
+pricing tokens of every user, so these reads go to Space:
+
+```python
+from space_client.types import ResyncInfo
+
+
+def on_resync(info: ResyncInfo):
+	if info.namespace == "contracts" and info.reconnect:
+		refresh_cached_contracts()  # e.g. get_contract() for each user you hold
+
+
+client.on("resync", on_resync)
+```
+
+If you read contracts before the contract listener joined `/contracts`,
+re-read them on the first `resync` too. python-socketio reconnects on its own
+(`reconnection=True`); the sync client's reconnection to add `/contracts` also
+fires `resync` for `pricings`.
+
+The deduplication window is configurable, or can be turned off:
+
+```python
+from space_client.types import EventDeduplicationOptions
+
+options = SpaceConnectionOptions(
+	url="http://localhost:5403",
+	api_key="your-api-key",
+	event_deduplication=EventDeduplicationOptions(max_entries=50_000, window_seconds=1800),
+	# or event_deduplication=False to deliver every copy
+)
+```
 
 ## Pricing Tokens
 

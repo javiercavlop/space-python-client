@@ -1,4 +1,5 @@
 from .cache_options import CacheOptions, CacheType, ExternalCacheConfig, RedisConfig
+from .event_details import EventDeduplicationOptions, EventDetails, ResyncInfo
 from .models import (
     BillingPeriod,
     BillingPeriodToCreate,
@@ -36,6 +37,8 @@ __all__ = [
     "ContractServicePricing",
     "ContractToCreate",
     "EvaluationError",
+    "EventDeduplicationOptions",
+    "EventDetails",
     "ExternalCacheConfig",
     "FeatureEvaluationResult",
     "NewContractsPricing",
@@ -49,6 +52,7 @@ __all__ = [
     "PricingTokenSubscription",
     "PricingYaml",
     "RedisConfig",
+    "ResyncInfo",
     "SpaceConnectionOptions",
     "SpaceEvent",
     "Subscription",

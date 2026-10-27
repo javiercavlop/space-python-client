@@ -206,6 +206,21 @@ class CacheModule:
             for key in self.keys(pattern):
                 self.delete(key)
 
+    def invalidate_all_users(self) -> None:
+        """Invalidate the cache keys of every user.
+
+        Contracts, evaluations, subscriptions and pricing tokens, e.g. after
+        contract events may have been missed.
+
+        Returns:
+            None: No value is returned.
+        """
+        if not self.is_enabled():
+            return
+        for pattern in ("contract:*", "feature:*", "subscription:*", "pricing-token:*"):
+            for key in self.keys(pattern):
+                self.delete(key)
+
     def close(self) -> None:
         """Close provider and disable cache module.
 
