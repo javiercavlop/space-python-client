@@ -208,12 +208,12 @@ local registry. Supports `async with`.
 |---|---|
 | `get_contract(user_id)` | `Contract | None` |
 | `add_contract(contract_to_create)` | `Contract | None` |
-| `update_contract_subscription(user_id, new_subscription, expected_contract_version=<unset>, keep_billing_period=False)` | `Contract | None` |
+| `update_contract_subscription(user_id, new_subscription, expected_contract_version=<unset>, keep_billing_period=False, reject_private=False)` | `Contract | None` |
 | `update_contract_subscription_by_group_id(group_id, new_subscription)` | `list[Contract] | None` |
 | `update_contract_usage_levels(user_id, service_name, usage_levels_novations)` | `Contract | None` |
 | `remove_contract(user_id)` | `None` |
 | `get_pricings(user_id)` | `ContractPricings` |
-| `preview_novation(user_id, new_subscription, keep_billing_period=False)` | `NovationPreview` |
+| `preview_novation(user_id, new_subscription, keep_billing_period=False, reject_private=False)` | `NovationPreview` |
 
 Java-style aliases are also available (`getContract`, `addContract`, etc.).
 
@@ -301,18 +301,22 @@ else:
   quietly turn a conditional update into an unconditional one.
 - `keep_billing_period=True` sends `?keepBillingPeriod=true`: history is still
   recorded but the billing period is not restarted.
+- `reject_private=True` (on both calls) sends `?rejectPrivate=true`, asking
+  Space to refuse private plans and add-ons. Rejection is opt-in: without it
+  Space accepts them, as before.
 - `Contract.contract_version` is filled from the body or, failing that, from the
   `ETag` of the update response. It is `None` on Space versions without it.
 
 > **Older Space versions.** A Space without optimistic concurrency ignores
-> `If-Match`, and one without `keepBillingPeriod` ignores the query and restarts
-> the billing period. So the client does not trust the options blindly. When
-> `expected_contract_version` or `keep_billing_period` is set:
+> `If-Match`, one without `keepBillingPeriod` ignores the query and restarts
+> the billing period, and one without `rejectPrivate` accepts private plans.
+> So the client does not trust the options blindly. When
+> `expected_contract_version`, `keep_billing_period` or `reject_private` is set:
 >
 > - **Before writing** it checks the `X-Space-Capabilities` header for
->   `contract-version` / `keep-billing-period`. The header is read from any
->   Space response and cached per client for `CAPABILITIES_TTL_SECONDS` (60 s;
->   `client.clear_capabilities()` forgets it). When nothing recent is known, it
+>   `contract-version` / `keep-billing-period` / `reject-private`. The header
+>   is read from any Space response and cached per client for
+>   `CAPABILITIES_TTL_SECONDS` (60 s; `client.clear_capabilities()` forgets it). When nothing recent is known, it
 >   reads the contract once. If a token is missing it raises
 >   `SpaceFeatureUnsupportedError` (`capability`, `written=False`) and **writes
 >   nothing**. If that read's `ETag` already differs from
@@ -323,8 +327,9 @@ else:
 >   ignored anyway: no `ETag` with `expected_contract_version`, or a different
 >   `billingPeriod.startDate` with `keep_billing_period`. The user's cache
 >   entries are dropped.
-> - `preview_novation(..., keep_billing_period=True)` raises the same error when
->   the Space that answered does not advertise `keep-billing-period`.
+> - `preview_novation(..., keep_billing_period=True)` or `reject_private=True`
+>   raises the same error when the Space that answered does not advertise
+>   `keep-billing-period` / `reject-private`.
 >
 > Without options nothing is checked and the request is the same single PUT
 > as before.
@@ -443,8 +448,8 @@ client.connect()
   contract changed since that version (HTTP 412). It carries `user_id`,
   `expected_contract_version` and the current `contract_version`, and the
   user's cached entries are invalidated.
-- With `expected_contract_version` or `keep_billing_period`, the same call
-  raises `SpaceFeatureUnsupportedError` when the connected Space does not
+- With `expected_contract_version`, `keep_billing_period` or `reject_private`,
+  the same call raises `SpaceFeatureUnsupportedError` when the connected Space does not
   implement the option (`written=False`, nothing sent) or applied the change
   without honouring it (`written=True`, `contract` set). An explicit empty
   `expected_contract_version` raises `ValueError`.

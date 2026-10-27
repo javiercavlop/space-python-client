@@ -54,6 +54,7 @@ class _ContractCalls:
         new_subscription: Subscription,
         expected_contract_version: str = operations.UNSET,
         keep_billing_period: bool = False,
+        reject_private: bool = False,
     ) -> Result[Contract | None]:
         """Update subscription for a single user (novation).
 
@@ -70,9 +71,11 @@ class _ContractCalls:
                 condition.
             keep_billing_period (bool): Keep the current billing period instead of
                 restarting it (``?keepBillingPeriod=true``). Default: restart.
+            reject_private (bool): Ask Space to reject private plans and add-ons
+                (``?rejectPrivate=true``). Default: Space accepts them, as before.
 
-        Both options need a Space that implements them (``X-Space-Capabilities``
-        tokens ``contract-version`` and ``keep-billing-period``). Before writing,
+        The options need a Space that implements them (``X-Space-Capabilities``
+        tokens ``contract-version``, ``keep-billing-period``, ``reject-private``). Before writing,
         the client checks them - from any recent response, or by reading the
         contract once, which also lets a stale expected version fail early - and
         after writing it checks the answer (an ``ETag``; an unchanged billing
@@ -98,6 +101,7 @@ class _ContractCalls:
                 expected_contract_version,
                 keep_billing_period,
                 capabilities=self._capabilities,
+                reject_private=reject_private,
             )
         )
 
@@ -106,6 +110,7 @@ class _ContractCalls:
         user_id: str,
         new_subscription: Subscription,
         keep_billing_period: bool = False,
+        reject_private: bool = False,
     ) -> Result[NovationPreview]:
         """Preview a novation without applying it.
 
@@ -121,6 +126,9 @@ class _ContractCalls:
             keep_billing_period (bool): Preview keeping the current billing period.
                 Raises ``SpaceFeatureUnsupportedError`` if the Space that answered
                 does not advertise ``keep-billing-period``.
+            reject_private (bool): Preview with private plans and add-ons
+                rejected (``?rejectPrivate=true``); raises the same error when
+                Space does not advertise ``reject-private``.
 
         Returns:
             NovationPreview: Validity, errors, the effective subscription,
@@ -129,7 +137,11 @@ class _ContractCalls:
         """
         return self._run(
             operations.preview_novation(
-                user_id, new_subscription, keep_billing_period, capabilities=self._capabilities
+                user_id,
+                new_subscription,
+                keep_billing_period,
+                capabilities=self._capabilities,
+                reject_private=reject_private,
             )
         )
 

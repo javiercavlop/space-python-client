@@ -553,3 +553,106 @@ def test_previewing_with_keep_billing_period_on_an_old_space_raises(space):
 
     # Without the option an old Space's preview is still an answer.
     assert call(client.contracts.preview_novation("u1", CHANGE)).valid is False
+
+
+# -- S8: rejectPrivate (opt-in) ----------------------------------------------
+#
+# Rejecting private plans/add-ons is opt-in on the server (`rejectPrivate=true`,
+# capability `reject-private`). A Space that does not know it would accept a
+# private plan without a word, so the client refuses rather than send it.
+
+WITH_REJECT_PRIVATE = {"X-Space-Capabilities": CAPABILITIES["X-Space-Capabilities"] + ",reject-private"}
+
+
+@respx.mock
+def test_update_can_ask_space_to_reject_private_plans(space):
+    client, call = space
+    new_space_contract(etag='"3"', capabilities=WITH_REJECT_PRIVATE)
+    route = respx.put(url__startswith=f"{API_URL}/contracts/u1").mock(
+        return_value=put_answer(capabilities=WITH_REJECT_PRIVATE)
+    )
+
+    call(
+        client.contracts.update_contract_subscription(
+            "u1", CHANGE, expected_contract_version="3", keep_billing_period=True, reject_private=True
+        )
+    )
+
+    params = route.calls.last.request.url.params
+    assert params["rejectPrivate"] == "true"
+    assert params["keepBillingPeriod"] == "true"
+
+
+@respx.mock
+def test_reject_private_alone_is_checked_too(space):
+    client, call = space
+    new_space_contract(etag='"3"', capabilities=WITH_REJECT_PRIVATE)
+    route = respx.put(url__startswith=f"{API_URL}/contracts/u1").mock(
+        return_value=put_answer(capabilities=WITH_REJECT_PRIVATE)
+    )
+
+    call(client.contracts.update_contract_subscription("u1", CHANGE, reject_private=True))
+
+    request = route.calls.last.request
+    assert request.url.params["rejectPrivate"] == "true"
+    assert "keepBillingPeriod" not in request.url.params
+    assert "If-Match" not in request.headers
+
+
+@pytest.mark.parametrize("capabilities", [CAPABILITIES, {}])
+@respx.mock
+def test_a_space_without_reject_private_gets_no_write(space, capabilities):
+    client, call = space
+    # A Space with S5/S8-keepBillingPeriod but without opt-in rejection, and one
+    # without any capability header at all.
+    probe = respx.get(f"{API_URL}/contracts/u1").mock(
+        return_value=httpx.Response(200, json=CONTRACT, headers={**capabilities, "ETag": '"3"'})
+    )
+    route = respx.put(url__startswith=f"{API_URL}/contracts/u1").mock(return_value=put_answer())
+
+    with pytest.raises(SpaceFeatureUnsupportedError) as caught:
+        call(client.contracts.update_contract_subscription("u1", CHANGE, reject_private=True))
+
+    assert caught.value.capability == "reject-private"
+    assert caught.value.written is False
+    assert "reject_private" in str(caught.value)
+    assert probe.called and not route.called
+
+
+@respx.mock
+def test_preview_can_reject_private_plans_on_a_space_that_supports_it(space):
+    client, call = space
+    route = respx.post(f"{API_URL}/contracts/u1/novation/preview").mock(
+        return_value=httpx.Response(200, json=PREVIEW, headers=WITH_REJECT_PRIVATE)
+    )
+
+    preview = call(client.contracts.preview_novation("u1", CHANGE, reject_private=True))
+
+    assert route.calls.last.request.url.params["rejectPrivate"] == "true"
+    assert preview.valid is False
+
+
+@respx.mock
+def test_preview_with_reject_private_on_a_space_without_it_raises(space):
+    client, call = space
+    respx.post(f"{API_URL}/contracts/u1/novation/preview").mock(
+        return_value=httpx.Response(200, json=PREVIEW, headers=CAPABILITIES)
+    )
+
+    with pytest.raises(SpaceFeatureUnsupportedError) as caught:
+        call(client.contracts.preview_novation("u1", CHANGE, reject_private=True))
+
+    assert caught.value.capability == "reject-private"
+    assert caught.value.written is False
+
+
+@respx.mock
+def test_without_reject_private_nothing_is_sent_or_checked(space):
+    client, call = space
+    route = respx.post(f"{API_URL}/contracts/u1/novation/preview").mock(
+        return_value=httpx.Response(200, json=PREVIEW)
+    )
+
+    call(client.contracts.preview_novation("u1", CHANGE))
+
+    assert "rejectPrivate" not in route.calls.last.request.url.params

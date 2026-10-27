@@ -104,10 +104,12 @@ def _no_capabilities() -> "frozenset[str] | None":
 PRICING_YAML = "pricing-yaml"
 CONTRACT_VERSION = "contract-version"
 KEEP_BILLING_PERIOD = "keep-billing-period"
+REJECT_PRIVATE = "reject-private"
 
 _OPTION_OF = {
     CONTRACT_VERSION: "expected_contract_version (If-Match)",
     KEEP_BILLING_PERIOD: "keep_billing_period",
+    REJECT_PRIVATE: "reject_private",
 }
 
 
@@ -191,12 +193,14 @@ def update_contract_subscription(
     expected_contract_version: Any = UNSET,
     keep_billing_period: bool = False,
     capabilities: Capabilities = _no_capabilities,
+    reject_private: bool = False,
 ) -> Work[Contract | None]:
     """The novation, guarded when the caller asked for a guarantee (S0).
 
     Without options it is the single PUT it always was. With
-    ``expected_contract_version`` or ``keep_billing_period`` the client first
-    makes sure Space advertises ``contract-version`` / ``keep-billing-period``
+    ``expected_contract_version``, ``keep_billing_period`` or ``reject_private``
+    the client first makes sure Space advertises ``contract-version`` /
+    ``keep-billing-period`` / ``reject-private``
     (reading the contract once when it does not know), refuses without writing
     if it does not, and checks the answer for signs the option was ignored.
     """
@@ -211,12 +215,18 @@ def update_contract_subscription(
 
     required = [
         capability
-        for capability, wanted in ((CONTRACT_VERSION, conditional), (KEEP_BILLING_PERIOD, keep_billing_period))
+        for capability, wanted in (
+            (CONTRACT_VERSION, conditional),
+            (KEEP_BILLING_PERIOD, keep_billing_period),
+            (REJECT_PRIVATE, reject_private),
+        )
         if wanted
     ]
     if not required:
         return _novation_put(user_id, new_subscription, None, False)
-    return _guarded_novation(user_id, new_subscription, expected, keep_billing_period, required, capabilities)
+    return _guarded_novation(
+        user_id, new_subscription, expected, keep_billing_period, required, capabilities, reject_private
+    )
 
 
 def _refuse_empty_version() -> Flow[Contract | None]:
@@ -234,6 +244,7 @@ def _guarded_novation(
     keep_billing_period: bool,
     required: list[str],
     capabilities: Capabilities,
+    reject_private: bool = False,
 ) -> Flow[Contract | None]:
     before: Contract | None = None
     known = capabilities()
@@ -244,7 +255,7 @@ def _guarded_novation(
     else:
         _require(required, known)
     return (
-        yield _novation_put(user_id, new_subscription, expected, keep_billing_period, before)
+        yield _novation_put(user_id, new_subscription, expected, keep_billing_period, before, reject_private)
     )
 
 
@@ -292,6 +303,7 @@ def _novation_put(
     expected: str | None,
     keep_billing_period: bool,
     before: Contract | None = None,
+    reject_private: bool = False,
 ) -> Operation[Contract | None]:
     headers: dict[str, str] | None = None
     if expected is not None:
@@ -332,7 +344,7 @@ def _novation_put(
     # callers relying on the old URL see no change.
     return Operation(
         "PUT",
-        f"/contracts/{user_id}{_novation_query(keep_billing_period)}",
+        f"/contracts/{user_id}{_novation_query(keep_billing_period, reject_private)}",
         json=new_subscription.to_dict(),
         headers=headers,
         raw=True,
@@ -352,8 +364,10 @@ def _ignored_option(
     if expected is not None and not etag:
         return (
             CONTRACT_VERSION,
-            "Space applied the novation without an ETag: If-Match (expected_contract_version) "
-            "was not enforced",
+            (
+                "Space applied the novation without an ETag: If-Match (expected_contract_version) "
+                "was not enforced"
+            ),
         )
     if keep_billing_period and isinstance(payload, dict):
         after = Contract.from_dict(payload)
@@ -365,8 +379,10 @@ def _ignored_option(
         if previous is not None and current is not None and not _same_instant(previous, current):
             return (
                 KEEP_BILLING_PERIOD,
-                "Space applied the novation but restarted the billing period "
-                "(keep_billing_period was ignored)",
+                (
+                    "Space applied the novation but restarted the billing period "
+                    "(keep_billing_period was ignored)"
+                ),
             )
     return None
 
@@ -393,6 +409,7 @@ def preview_novation(
     new_subscription: Subscription,
     keep_billing_period: bool = False,
     capabilities: Capabilities = _no_capabilities,
+    reject_private: bool = False,
 ) -> Operation[NovationPreview]:
     body = new_subscription.to_dict()
     if not body.get("contractedServices"):
@@ -401,24 +418,32 @@ def preview_novation(
 
     # A dry run writes nothing, so it leaves the cache alone.
     def parse(_cache: "CacheModule", payload: Any) -> NovationPreview:
-        if keep_billing_period and KEEP_BILLING_PERIOD not in (capabilities() or frozenset()):
-            # The preview would describe a restart the caller asked to avoid.
-            raise SpaceFeatureUnsupportedError(
-                KEEP_BILLING_PERIOD,
-                "The connected Space does not support keep_billing_period: the preview ignored it",
-            )
+        known = capabilities() or frozenset()
+        # The preview would describe something the caller asked to avoid: a
+        # restarted period, or a private plan accepted.
+        for capability, wanted in ((KEEP_BILLING_PERIOD, keep_billing_period), (REJECT_PRIVATE, reject_private)):
+            if wanted and capability not in known:
+                raise SpaceFeatureUnsupportedError(
+                    capability,
+                    f"The connected Space does not support {_OPTION_OF[capability]}: the preview ignored it",
+                )
         return NovationPreview.from_dict(payload if isinstance(payload, dict) else {})
 
     return Operation(
         "POST",
-        f"/contracts/{_segment(user_id)}/novation/preview{_novation_query(keep_billing_period)}",
+        f"/contracts/{_segment(user_id)}/novation/preview{_novation_query(keep_billing_period, reject_private)}",
         json=body,
         parse=parse,
     )
 
 
-def _novation_query(keep_billing_period: bool) -> str:
-    return "?keepBillingPeriod=true" if keep_billing_period else ""
+def _novation_query(keep_billing_period: bool, reject_private: bool = False) -> str:
+    params = [
+        name
+        for name, wanted in (("keepBillingPeriod=true", keep_billing_period), ("rejectPrivate=true", reject_private))
+        if wanted
+    ]
+    return "?" + "&".join(params) if params else ""
 
 
 def update_contract_subscription_by_group_id(
