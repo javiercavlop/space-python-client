@@ -18,6 +18,7 @@ Python client library for [Space](https://github.com/isa-group/space), a pricing
 - [Caching](#caching)
 - [WebSocket Events](#websocket-events)
 - [Pricing Tokens](#pricing-tokens)
+- [Consumption, retries and Idempotency-Key](#consumption-retries-and-idempotency-key)
 - [Error Handling](#error-handling)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -188,6 +189,7 @@ Core methods:
 | Method | Returns | Details |
 |---|---|---|
 | `is_connected_to_space()` | `bool` | HTTP health check against `/healthcheck`. |
+| `has_capability(token)` | `bool` | Whether Space advertises an `X-Space-Capabilities` token (`idempotency-key`, `atomic-usage-limits`...), from a recent response or `GET /healthcheck`. |
 | `on(event, callback)` | `None` | Registers event callback for supported event names. |
 | `remove_listener(event)` | `None` | Removes one callback by event name. |
 | `remove_all_listeners()` | `None` | Removes all event callbacks. |
@@ -209,10 +211,10 @@ local registry. Supports `async with`.
 | Method | Returns |
 |---|---|
 | `get_contract(user_id)` | `Contract | None` |
-| `add_contract(contract_to_create)` | `Contract | None` |
-| `update_contract_subscription(user_id, new_subscription, expected_contract_version=<unset>, keep_billing_period=False, reject_private=False)` | `Contract | None` |
-| `update_contract_subscription_by_group_id(group_id, new_subscription)` | `list[Contract] | None` |
-| `update_contract_usage_levels(user_id, service_name, usage_levels_novations)` | `Contract | None` |
+| `add_contract(contract_to_create, idempotency_key=None)` | `Contract | None` |
+| `update_contract_subscription(user_id, new_subscription, expected_contract_version=<unset>, keep_billing_period=False, reject_private=False, idempotency_key=None)` | `Contract | None` |
+| `update_contract_subscription_by_group_id(group_id, new_subscription, idempotency_key=None)` | `list[Contract] | None` |
+| `update_contract_usage_levels(user_id, service_name, usage_levels_novations, idempotency_key=None)` | `Contract | None` |
 | `remove_contract(user_id)` | `None` |
 | `get_pricings(user_id)` | `ContractPricings` |
 | `preview_novation(user_id, new_subscription, keep_billing_period=False, reject_private=False)` | `NovationPreview` |
@@ -351,11 +353,15 @@ served from cache: its `contract_version` matters only while it is current.
 
 | Method | Returns |
 |---|---|
-| `evaluate(user_id, feature_id, expected_consumption=None, details=False, server=False)` | `FeatureEvaluationResult` |
-| `revert_evaluation(user_id, feature_id, revert_to_latest=True)` | `bool` |
+| `evaluate(user_id, feature_id, expected_consumption=None, details=False, server=False, idempotency_key=None)` | `FeatureEvaluationResult` (with `consumption_id` after a consumption) |
+| `revert_consumption(user_id, feature_id, consumption_id, idempotency_key=None)` | `bool`: `True` reverted (now or before), `False` unknown or expired id (404) |
+| `revert_evaluation(user_id, feature_id, revert_to_latest=True, idempotency_key=None)` | `bool` (**deprecated**, emits `DeprecationWarning`: use `revert_consumption`) |
 | `generate_user_pricing_token(user_id)` | `str | None` |
 
-Java-style aliases are also available (`revertEvaluation`, `generateUserPricingToken`).
+Java-style aliases are also available (`revertEvaluation`, `revertConsumption`, `generateUserPricingToken`).
+
+The writes in these tables carry an `Idempotency-Key`; see
+[Consumption, retries and Idempotency-Key](#consumption-retries-and-idempotency-key).
 
 ## Data Models
 
@@ -487,6 +493,69 @@ if payload.subscription is not None:  # None for tokens from older Space version
 `decode_pricing_token` does **not** verify the signature: use it to read a token
 you just received from Space, never to authenticate one a client sent you.
 
+## Consumption, retries and Idempotency-Key
+
+Consumptions (`evaluate` with an `expected_consumption`), reverts, contract
+creation, novations (single and by group) and usage level changes are writes
+that must not be applied twice when a request is retried after a timeout or a
+dropped connection. Each of these calls sends an `Idempotency-Key` header. On a
+Space with the `idempotency-key` capability, a request repeated with the same
+key gets the stored outcome of the first one (`Idempotent-Replayed: true`) and
+applies nothing; an older Space ignores the header. Evaluations without a
+consumption and reads carry no key.
+
+- **Generated keys.** By default the client creates a random UUID v4 per call
+  and reuses it for that call's own retries, which covers retries inside one
+  process.
+- **Your own key.** When the operation may be retried after the process
+  restarts (a job queue, an outbox, a webhook handler), create the key once,
+  store it with the operation and pass it on every attempt
+  (`idempotency_key=...`). Use a new key for each new operation, and a new key
+  after correcting a request Space refused with a `4xx`. With a key of your own
+  the client first checks that Space advertises `idempotency-key` and raises
+  `SpaceFeatureUnsupportedError` (`written=False`, nothing sent) if it does not.
+  A key that is not 1 to 255 characters raises `ValueError`.
+- **Retries** are off by default (`SpaceConnectionOptions(retries=0)`). With
+  `retries=n` (0 to 10) the client retries those keyed writes, with the same
+  key and the same request, after a `SpaceConnectionError`, a `5xx` or a
+  `409 IDEMPOTENCY_IN_PROGRESS`, and only while Space advertises
+  `idempotency-key` (without it each retry could be applied again). It waits
+  `Retry-After` when Space sends one (and stops if that is longer than
+  `retry_max_delay_ms`), otherwise an exponential backoff with jitter from
+  `retry_base_delay_ms` (250 ms) up to `retry_max_delay_ms` (10 s). Other `4xx`
+  and requests without a key are never retried.
+
+```python
+from space_client import IdempotencyInProgressError, SpaceClientFactory
+from space_client.types import SpaceConnectionOptions
+
+client = SpaceClientFactory.connect(
+    SpaceConnectionOptions(url="http://localhost:3000", api_key="your-api-key", retries=2)
+)
+
+# job.idempotency_key = str(uuid.uuid4()), created and stored when the job was enqueued.
+result = client.features.evaluate(
+    job.user_id, "acme-exports", {"acme-maxExports": 1}, idempotency_key=job.idempotency_key
+)
+if not result.eval:
+    return  # over the limit: nothing was consumed
+try:
+    run_export(job)
+except Exception:
+    # Give back exactly this consumption, whatever happened meanwhile.
+    client.features.revert_consumption(
+        job.user_id, "acme-exports", result.consumption_id,
+        idempotency_key=f"{job.idempotency_key}:revert",
+    )
+    raise
+```
+
+With `atomic-usage-limits`, Space applies a consumption only if every amount
+fits its limit, also under concurrency; one that does not fit answers
+`eval=False` and consumes nothing. A `consumption_id` stays revertible for
+Space's `CONSUMPTION_RETENTION_SECONDS` (24 h by default), and keys are
+remembered for `IDEMPOTENCY_KEY_TTL_SECONDS` (24 h by default).
+
 ## Error Handling
 
 - Factory validation raises `ValueError` for invalid input.
@@ -510,6 +579,17 @@ you just received from Space, never to authenticate one a client sent you.
   implement the option (`written=False`, nothing sent) or applied the change
   without honouring it (`written=True`, `contract` set). An explicit empty
   `expected_contract_version` raises `ValueError`.
+- On the keyed writes, Space's idempotency refusals raise subclasses of
+  `IdempotencyError` (itself a `SpaceApiError`, with `code` and
+  `idempotency_key`): `IdempotencyConflictError` (`409 IDEMPOTENCY_CONFLICT`,
+  the key was used for a different request), `IdempotencyInProgressError`
+  (`409 IDEMPOTENCY_IN_PROGRESS` once the retries are spent; `retry_after` in
+  seconds; retry later with the same key) and `IdempotencyKeyInvalidError`
+  (`400 IDEMPOTENCY_KEY_INVALID`). `SpaceApiError.headers` holds the response
+  headers.
+- `features.revert_consumption(...)` raises `SpaceFeatureUnsupportedError`
+  (`capability == "atomic-usage-limits"`) without sending anything on a Space
+  that cannot revert by id.
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 
