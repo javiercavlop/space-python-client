@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from space_client.space_client import SpaceClient
 from space_client.types import CacheOptions, SpaceConnectionOptions
 
@@ -24,10 +26,12 @@ def test_evaluate_revert_and_pricing_token(monkeypatch):
     client = SpaceClient(options)
 
     def fake_request(method, url, headers=None, json=None):
+        # The revert goes to the feature route (it used to go to /features/u1,
+        # which evaluates every feature and reverts nothing).
         if method == "POST" and "/api/v1/features/u1/f1" in url and "pricing-token" not in url and "revert=true" not in url:
             return FakeResponse(200, {"eval": True, "used": {"calls": 1}, "limit": {"calls": 10}, "error": None})
 
-        if method == "POST" and "/api/v1/features/u1?revert=true" in url:
+        if method == "POST" and "/api/v1/features/u1/f1?revert=true" in url:
             return FakeResponse(200, {"ok": True})
 
         if method == "POST" and url.endswith("/api/v1/features/u1/pricing-token"):
@@ -44,7 +48,8 @@ def test_evaluate_revert_and_pricing_token(monkeypatch):
     second = client.features.evaluate("u1", "f1")
     assert second.eval is True
 
-    assert client.features.revert_evaluation("u1", "f1") is True
+    with pytest.deprecated_call():
+        assert client.features.revert_evaluation("u1", "f1") is True
 
     token = client.features.generate_user_pricing_token("u1")
     assert token == "token-123"

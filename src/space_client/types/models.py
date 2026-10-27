@@ -31,6 +31,11 @@ class FeatureEvaluationResult:
     used: dict[str, Any] = field(default_factory=dict)
     limit: dict[str, Any] = field(default_factory=dict)
     error: EvaluationError | None = None
+    consumption_id: str | None = None
+    """Only when this evaluation applied an expected consumption, on a Space
+    with ``atomic-usage-limits``: the id to revert exactly that consumption
+    with ``features.revert_consumption``. The same id comes back when Space
+    replays the request."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "FeatureEvaluationResult":
@@ -48,6 +53,7 @@ class FeatureEvaluationResult:
             used=dict(payload.get("used", {})),
             limit=dict(payload.get("limit", {})),
             error=EvaluationError.from_dict(payload.get("error")),
+            consumption_id=payload.get("consumptionId"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -59,6 +65,9 @@ class FeatureEvaluationResult:
         result = asdict(self)
         if self.error is None:
             result["error"] = None
+        consumption_id = result.pop("consumption_id", None)
+        if consumption_id is not None:
+            result["consumptionId"] = consumption_id
         return result
 
 

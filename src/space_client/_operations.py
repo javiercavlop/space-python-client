@@ -14,6 +14,7 @@ part that must differ.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Generator, Generic, TypeVar, Union
@@ -67,6 +68,15 @@ class Operation(Generic[T]):
         on_refusal: Called with the :class:`SpaceApiError` when Space refuses;
             it may raise a more specific error (which must still be a
             ``SpaceApiError``) or return to let the generic one propagate.
+        idempotency_key: Set on the writes Space can apply at most once: sent
+            as ``Idempotency-Key``, the same on every attempt. The runners
+            retry these operations (and only these) per the client's
+            ``retries`` and map Space's idempotency refusals to typed errors.
+        explicit_key: True when the key is the caller's: the runner checks it
+            and makes sure Space supports ``idempotency-key`` before sending.
+        requires: ``(capability, what)`` pairs the runner checks before
+            sending; a missing one raises ``SpaceFeatureUnsupportedError`` and
+            nothing is written.
     """
 
     method: str
@@ -81,6 +91,9 @@ class Operation(Generic[T]):
     raw: bool = False
     accept: frozenset[int] = frozenset()
     on_refusal: Callable[["CacheModule", SpaceApiError], None] | None = None
+    idempotency_key: str | None = None
+    explicit_key: bool = False
+    requires: tuple[tuple[str, str], ...] = ()
 
 
 Flow = Generator[Operation[Any], Any, T]
@@ -105,6 +118,8 @@ PRICING_YAML = "pricing-yaml"
 CONTRACT_VERSION = "contract-version"
 KEEP_BILLING_PERIOD = "keep-billing-period"
 REJECT_PRIVATE = "reject-private"
+IDEMPOTENCY_KEY = "idempotency-key"
+ATOMIC_USAGE_LIMITS = "atomic-usage-limits"
 
 _OPTION_OF = {
     CONTRACT_VERSION: "expected_contract_version (If-Match)",
@@ -121,6 +136,16 @@ class _Unset:
 
 
 UNSET: Any = _Unset()
+
+
+def _key(idempotency_key: str | None) -> tuple[str, bool]:
+    """The ``Idempotency-Key`` of one operation: the caller's, or a new UUID v4.
+
+    Made once, when the operation is built, so the runner's retries reuse it.
+    """
+    if idempotency_key is None:
+        return str(uuid.uuid4()), False
+    return idempotency_key, True
 
 
 def _segment(value: str) -> str:
@@ -174,7 +199,9 @@ def get_contract(user_id: str) -> Operation[Contract | None]:
     return Operation("GET", f"/contracts/{user_id}", cache_hit=hit, parse=parse)
 
 
-def add_contract(contract_to_create: ContractToCreate) -> Operation[Contract | None]:
+def add_contract(
+    contract_to_create: ContractToCreate, idempotency_key: str | None = None
+) -> Operation[Contract | None]:
     def parse(cache: "CacheModule", payload: Any) -> Contract | None:
         if payload is None:
             return None
@@ -184,7 +211,15 @@ def add_contract(contract_to_create: ContractToCreate) -> Operation[Contract | N
             cache.set(cache.get_contract_key(contract.user_id), payload)
         return contract
 
-    return Operation("POST", "/contracts", json=contract_to_create.to_dict(), parse=parse)
+    key, explicit = _key(idempotency_key)
+    return Operation(
+        "POST",
+        "/contracts",
+        json=contract_to_create.to_dict(),
+        parse=parse,
+        idempotency_key=key,
+        explicit_key=explicit,
+    )
 
 
 def update_contract_subscription(
@@ -194,6 +229,7 @@ def update_contract_subscription(
     keep_billing_period: bool = False,
     capabilities: Capabilities = _no_capabilities,
     reject_private: bool = False,
+    idempotency_key: str | None = None,
 ) -> Work[Contract | None]:
     """The novation, guarded when the caller asked for a guarantee (S0).
 
@@ -222,10 +258,11 @@ def update_contract_subscription(
         )
         if wanted
     ]
+    key = _key(idempotency_key)
     if not required:
-        return _novation_put(user_id, new_subscription, None, False)
+        return _novation_put(user_id, new_subscription, None, False, key=key)
     return _guarded_novation(
-        user_id, new_subscription, expected, keep_billing_period, required, capabilities, reject_private
+        user_id, new_subscription, expected, keep_billing_period, required, capabilities, reject_private, key
     )
 
 
@@ -245,6 +282,7 @@ def _guarded_novation(
     required: list[str],
     capabilities: Capabilities,
     reject_private: bool = False,
+    key: tuple[str, bool] | None = None,
 ) -> Flow[Contract | None]:
     before: Contract | None = None
     known = capabilities()
@@ -255,7 +293,7 @@ def _guarded_novation(
     else:
         _require(required, known)
     return (
-        yield _novation_put(user_id, new_subscription, expected, keep_billing_period, before, reject_private)
+        yield _novation_put(user_id, new_subscription, expected, keep_billing_period, before, reject_private, key)
     )
 
 
@@ -304,7 +342,9 @@ def _novation_put(
     keep_billing_period: bool,
     before: Contract | None = None,
     reject_private: bool = False,
+    key: tuple[str, bool] | None = None,
 ) -> Operation[Contract | None]:
+    idempotency_key, explicit = key if key is not None else _key(None)
     headers: dict[str, str] | None = None
     if expected is not None:
         headers = {"If-Match": _quote_etag(expected)}
@@ -350,6 +390,8 @@ def _novation_put(
         raw=True,
         parse=parse,
         on_refusal=on_refusal,
+        idempotency_key=idempotency_key,
+        explicit_key=explicit,
     )
 
 
@@ -449,6 +491,7 @@ def _novation_query(keep_billing_period: bool, reject_private: bool = False) -> 
 def update_contract_subscription_by_group_id(
     group_id: str,
     new_subscription: Subscription,
+    idempotency_key: str | None = None,
 ) -> Operation[list[Contract] | None]:
     def parse(cache: "CacheModule", payload: Any) -> list[Contract] | None:
         if payload is None or not isinstance(payload, list):
@@ -462,11 +505,14 @@ def update_contract_subscription_by_group_id(
                 cache.set(cache.get_contract_key(contract.user_id), raw)
         return contracts
 
+    key, explicit = _key(idempotency_key)
     return Operation(
         "PUT",
         f"/contracts?groupId={group_id}",
         json=new_subscription.to_dict(),
         parse=parse,
+        idempotency_key=key,
+        explicit_key=explicit,
     )
 
 
@@ -474,12 +520,16 @@ def update_contract_usage_levels(
     user_id: str,
     service_name: str,
     usage_levels_novations: dict[str, int | float],
+    idempotency_key: str | None = None,
 ) -> Operation[Contract | None]:
+    key, explicit = _key(idempotency_key)
     return Operation(
         "PUT",
         f"/contracts/{user_id}/usageLevels",
         json={service_name: usage_levels_novations},
         parse=_replace_one(user_id),
+        idempotency_key=key,
+        explicit_key=explicit,
     )
 
 
@@ -602,6 +652,7 @@ def evaluate(
     expected_consumption: dict[str, int | float] | None = None,
     details: bool = False,
     server: bool = False,
+    idempotency_key: str | None = None,
 ) -> Operation[FeatureEvaluationResult]:
     expected_consumption = expected_consumption or {}
 
@@ -645,32 +696,95 @@ def evaluate(
         query_params.append("server=true")
     query = "?" + "&".join(query_params) if query_params else ""
 
+    # Only a consumption is a write: Space ignores the key on the others, and
+    # they are never retried.
+    key: str | None = None
+    explicit = False
+    if not is_read_only:
+        key, explicit = _key(idempotency_key)
     return Operation(
         "POST",
         f"/features/{user_id}/{feature_id}{query}",
         json=expected_consumption,
         cache_hit=hit,
         parse=parse,
+        idempotency_key=key,
+        explicit_key=explicit,
     )
 
 
-def revert_evaluation(user_id: str, feature_id: str, revert_to_latest: bool = True) -> Operation[bool]:
+def _forget_usage(cache: "CacheModule", user_id: str, feature_id: str) -> None:
+    if cache.is_enabled():
+        cache.delete(cache.get_feature_key(user_id, feature_id))
+        cache.delete(cache.get_contract_key(user_id))
+        cache.delete(cache.get_pricing_token_key(user_id))
+
+
+def revert_evaluation(
+    user_id: str,
+    feature_id: str,
+    revert_to_latest: bool = True,
+    idempotency_key: str | None = None,
+) -> Operation[bool]:
     def parse(cache: "CacheModule", accepted: Any) -> bool:
         if not accepted:
             return False
-        if cache.is_enabled():
-            cache.delete(cache.get_feature_key(user_id, feature_id))
-            cache.delete(cache.get_contract_key(user_id))
-            cache.delete(cache.get_pricing_token_key(user_id))
+        _forget_usage(cache, user_id, feature_id)
         return True
 
+    # On the feature route: ``/features/{userId}`` evaluates every feature and
+    # reverts nothing, which is where this call used to go.
+    key, explicit = _key(idempotency_key)
     return Operation(
         "POST",
-        f"/features/{user_id}?revert=true&latest={str(revert_to_latest).lower()}",
+        f"/features/{user_id}/{feature_id}?revert=true&latest={str(revert_to_latest).lower()}",
         json={},
         no_content=True,
         parse=parse,
+        idempotency_key=key,
+        explicit_key=explicit,
     )
+
+
+def revert_consumption(
+    user_id: str,
+    feature_id: str,
+    consumption_id: str,
+    idempotency_key: str | None = None,
+) -> Work[bool]:
+    """Revert exactly the consumption Space reported as ``consumptionId``.
+
+    True on ``204`` (reverted now or before), False on ``404`` (Space does not
+    know it). Needs ``atomic-usage-limits``: an older Space ignores the id and
+    restores a cached snapshot of the level instead.
+    """
+    if not isinstance(consumption_id, str) or not 1 <= len(consumption_id) <= 255:
+        return _refuse_consumption_id()
+
+    def parse(cache: "CacheModule", response: Any) -> bool:
+        if getattr(response, "status_code", 200) == 404:
+            return False
+        _forget_usage(cache, user_id, feature_id)
+        return True
+
+    key, explicit = _key(idempotency_key)
+    return Operation(
+        "POST",
+        f"/features/{_segment(user_id)}/{_segment(feature_id)}"
+        f"?revert=true&consumptionId={quote(consumption_id, safe='')}",
+        json={},
+        raw=True,
+        accept=frozenset({404}),
+        parse=parse,
+        idempotency_key=key,
+        explicit_key=explicit,
+        requires=((ATOMIC_USAGE_LIMITS, "revert by consumption_id"),),
+    )
+
+
+def _refuse_consumption_id() -> Flow[bool]:
+    raise ValueError("consumption_id must be a string of 1 to 255 characters")
+    yield  # pragma: no cover - makes this a generator
 
 
 def generate_user_pricing_token(user_id: str) -> Operation[str | None]:

@@ -44,11 +44,22 @@ class SpaceApiError(SpaceError):
     and it is lost the moment the response is turned into ``None``.
     """
 
-    def __init__(self, status_code: int, method: str, path: str, payload: Any = None):
+    def __init__(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        payload: Any = None,
+        headers: Any = None,
+    ):
         self.status_code = status_code
         self.method = method
         self.path = path
         self.payload = payload
+        # Response headers, names in lower case (``retry-after``...).
+        self.headers: dict[str, str] = {
+            str(name).lower(): str(value) for name, value in dict(headers or {}).items()
+        }
 
         detail = _describe(payload)
         super().__init__(
@@ -192,3 +203,90 @@ class ContractChangedError(SpaceApiError):
             expected_contract_version=expected_contract_version,
             contract_version=payload.get("contractVersion"),
         )
+
+
+class IdempotencyError(SpaceApiError):
+    """Space refused a write because of its ``Idempotency-Key``.
+
+    Raised for the three refusals of the ``idempotency-key`` capability; this
+    request applied nothing. ``code`` is Space's code and ``idempotency_key``
+    the key the request carried. A :class:`SpaceApiError`, so code that
+    catches refusals still does.
+    """
+
+    code = ""
+
+    def __init__(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        payload: Any = None,
+        headers: Any = None,
+        idempotency_key: str = "",
+    ):
+        super().__init__(status_code, method, path, payload, headers)
+        self.idempotency_key = idempotency_key
+
+    @classmethod
+    def from_error(cls, error: SpaceApiError, idempotency_key: str) -> "IdempotencyError":
+        return cls(
+            error.status_code,
+            error.method,
+            error.path,
+            error.payload,
+            error.headers,
+            idempotency_key=idempotency_key,
+        )
+
+
+class IdempotencyConflictError(IdempotencyError):
+    """``409 IDEMPOTENCY_CONFLICT``: the key was used for a different request.
+
+    Another body, query, route or ``If-Match`` was sent with this key before.
+    Nothing was applied. A new operation needs a new key; reusing one for
+    another operation is a bug of the caller.
+    """
+
+    code = "IDEMPOTENCY_CONFLICT"
+
+
+class IdempotencyInProgressError(IdempotencyError):
+    """``409 IDEMPOTENCY_IN_PROGRESS``: a request with the key is still running.
+
+    Raised once the client's retries (if any) are spent. Retry later with the
+    SAME key: Space then replays the outcome of the running request.
+    ``retry_after`` is Space's ``Retry-After`` in seconds, or None.
+    """
+
+    code = "IDEMPOTENCY_IN_PROGRESS"
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.retry_after: int | None = parse_retry_after(self.headers.get("retry-after"))
+
+
+class IdempotencyKeyInvalidError(IdempotencyError):
+    """``400 IDEMPOTENCY_KEY_INVALID``: the key is empty or longer than 255 characters."""
+
+    code = "IDEMPOTENCY_KEY_INVALID"
+
+
+def parse_retry_after(value: str | None) -> int | None:
+    """``Retry-After`` in seconds: delta-seconds or an HTTP date; None if absent or unreadable."""
+    if value is None or not value.strip():
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return int(text)
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(seconds + 0.999))

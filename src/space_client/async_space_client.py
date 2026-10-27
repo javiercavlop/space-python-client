@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
@@ -166,6 +167,35 @@ class AsyncSpaceClient(BaseSpaceClient):
     async def __aexit__(self, *_exc_info: Any) -> None:
         await self.close()
 
+    async def has_capability(self, capability: str) -> bool:
+        """Whether the connected Space advertises a capability token.
+
+        Uses the ``X-Space-Capabilities`` of a response seen less than
+        ``CAPABILITIES_TTL_SECONDS`` ago; when there is none, reads them from
+        ``GET /healthcheck`` (unauthenticated). False when they cannot be read.
+
+        Args:
+            capability (str): Token such as ``idempotency-key`` or
+                ``atomic-usage-limits``.
+
+        Returns:
+            bool: True when Space advertises it.
+        """
+        if self._cached_capabilities() is None:
+            await self._probe_capabilities()
+        return self._capability_in_cache(capability)
+
+    async def _probe_capabilities(self) -> None:
+        """Learn the capabilities from the healthcheck; failures leave them unknown."""
+        try:
+            await self._send("GET", "/healthcheck")
+        except SpaceConnectionError:
+            return
+
+    async def _sleep(self, seconds: float) -> None:
+        """Wait between retries (replaced in tests)."""
+        await asyncio.sleep(seconds)
+
     async def _send(
         self,
         method: str,
@@ -235,4 +265,5 @@ class AsyncSpaceClient(BaseSpaceClient):
         return response
 
     # Java compatibility aliases
+    hasCapability = has_capability
     isConnectedToSpace = is_connected_to_space

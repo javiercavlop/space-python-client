@@ -10,6 +10,7 @@ request is sent, and how the socket is opened.
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any, Callable
 
@@ -45,6 +46,9 @@ class BaseSpaceClient:
     CAPABILITIES_TTL_SECONDS = 60
     """How long the ``X-Space-Capabilities`` of a response are trusted."""
 
+    MAX_RETRIES = 10
+    """Upper bound of ``SpaceConnectionOptions.retries``."""
+
     _CONTRACT_EVENTS = frozenset(
         {
             SpaceEvent.CONTRACT_CREATED.value,
@@ -74,7 +78,8 @@ class BaseSpaceClient:
             None: This constructor initializes client state.
 
         Raises:
-            ValueError: If URL or API key are missing.
+            ValueError: If URL or API key are missing, or a retry option is out
+                of range.
         """
         if not options.url:
             raise ValueError("URL is required")
@@ -86,6 +91,21 @@ class BaseSpaceClient:
         self._api_key = options.api_key
         self._organization_id = getattr(options, "organization_id", None)
         self._timeout = options.timeout
+        self._retries = getattr(options, "retries", 0)
+        self._retry_base_delay_ms = getattr(options, "retry_base_delay_ms", 250)
+        self._retry_max_delay_ms = getattr(options, "retry_max_delay_ms", 10_000)
+        if (
+            isinstance(self._retries, bool)
+            or not isinstance(self._retries, int)
+            or not 0 <= self._retries <= self.MAX_RETRIES
+        ):
+            raise ValueError(f"retries must be an integer from 0 to {self.MAX_RETRIES}")
+        for name, value in (
+            ("retry_base_delay_ms", self._retry_base_delay_ms),
+            ("retry_max_delay_ms", self._retry_max_delay_ms),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"{name} must be a non-negative number of milliseconds")
         self._callbacks: dict[str, Callable[[Any], None]] = {}
         # The capabilities last advertised by Space, and when (see S0).
         self._capabilities: tuple[frozenset[str], float] | None = None
@@ -249,6 +269,24 @@ class BaseSpaceClient:
             return None
         return known[0]
 
+    def _capability_in_cache(self, capability: str) -> bool:
+        known = self._cached_capabilities()
+        return known is not None and capability.lower() in known
+
+    def _retry_delay(self, attempt: int, retry_after: int | None) -> float | None:
+        """Seconds to wait before retry number ``attempt + 1``, or None to stop.
+
+        ``Retry-After`` when Space sent one (stop if it is longer than
+        ``retry_max_delay_ms``: never wait less than asked), otherwise an
+        exponential backoff with jitter capped at ``retry_max_delay_ms``.
+        """
+        if attempt >= self._retries:
+            return None
+        if retry_after is not None:
+            return float(retry_after) if retry_after * 1000 <= self._retry_max_delay_ms else None
+        ceiling = min(self._retry_max_delay_ms, self._retry_base_delay_ms * 2**attempt) / 1000
+        return ceiling * (0.5 + random.random() / 2)
+
     def clear_capabilities(self) -> None:
         """Forget the cached capabilities, e.g. right after upgrading Space.
 
@@ -273,7 +311,13 @@ class BaseSpaceClient:
         if response.status_code in accept:
             return
         if response.status_code < 200 or response.status_code >= 300:
-            raise SpaceApiError(response.status_code, method, path, _read_body(response))
+            raise SpaceApiError(
+                response.status_code,
+                method,
+                path,
+                _read_body(response),
+                headers=getattr(response, "headers", None),
+            )
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {"x-api-key": self._api_key}

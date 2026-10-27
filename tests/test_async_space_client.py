@@ -49,10 +49,10 @@ def test_evaluate_revert_and_pricing_token(monkeypatch):
     calls: list = []
 
     def handler(method, url, json):
+        if method == "POST" and "/features/u1/f1?revert=true" in url:
+            return FakeResponse(200, {"ok": True})
         if method == "POST" and "/features/u1/f1" in url:
             return FakeResponse(200, {"eval": True, "used": {"calls": 1}, "limit": {"calls": 10}, "error": None})
-        if method == "POST" and "/features/u1?revert=true" in url:
-            return FakeResponse(200, {"ok": True})
         if method == "POST" and url.endswith("/features/u1/pricing-token"):
             return FakeResponse(200, {"pricingToken": "token-123"})
         return FakeResponse(500, {"error": "unexpected"})
@@ -70,7 +70,8 @@ def test_evaluate_revert_and_pricing_token(monkeypatch):
         assert second.eval is True
         assert len(calls) == before
 
-        assert await client.features.revert_evaluation("u1", "f1") is True
+        with pytest.deprecated_call():
+            assert await client.features.revert_evaluation("u1", "f1") is True
         assert await client.features.generate_user_pricing_token("u1") == "token-123"
 
         await client.close()

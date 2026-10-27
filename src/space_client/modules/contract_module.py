@@ -37,16 +37,28 @@ class _ContractCalls:
         """
         return self._run(operations.get_contract(user_id))
 
-    def add_contract(self, contract_to_create: ContractToCreate) -> Result[Contract | None]:
+    def add_contract(
+        self, contract_to_create: ContractToCreate, idempotency_key: str | None = None
+    ) -> Result[Contract | None]:
         """Create a contract in Space.
+
+        Sent with an ``Idempotency-Key``: on a Space with ``idempotency-key``, a
+        retry of a creation that succeeded answers the created contract instead
+        of ``409``.
 
         Args:
             contract_to_create (ContractToCreate): Contract creation payload.
+            idempotency_key (str | None): ``Idempotency-Key`` of this
+                operation (1 to 255 characters). Default: a new UUID v4, reused
+                on the client's own retries. Pass a key stored with the
+                operation to make retries after a restart safe; Space must then
+                advertise ``idempotency-key`` (``SpaceFeatureUnsupportedError``
+                otherwise, nothing sent).
 
         Returns:
             Contract | None: Created contract on success, otherwise None.
         """
-        return self._run(operations.add_contract(contract_to_create))
+        return self._run(operations.add_contract(contract_to_create, idempotency_key))
 
     def update_contract_subscription(
         self,
@@ -55,6 +67,7 @@ class _ContractCalls:
         expected_contract_version: str = operations.UNSET,
         keep_billing_period: bool = False,
         reject_private: bool = False,
+        idempotency_key: str | None = None,
     ) -> Result[Contract | None]:
         """Update subscription for a single user (novation).
 
@@ -73,6 +86,12 @@ class _ContractCalls:
                 restarting it (``?keepBillingPeriod=true``). Default: restart.
             reject_private (bool): Ask Space to reject private plans and add-ons
                 (``?rejectPrivate=true``). Default: Space accepts them, as before.
+            idempotency_key (str | None): ``Idempotency-Key`` of this
+                operation (1 to 255 characters). Default: a new UUID v4, reused
+                on the client's own retries. Pass a key stored with the
+                operation to make retries after a restart safe; Space must then
+                advertise ``idempotency-key`` (``SpaceFeatureUnsupportedError``
+                otherwise, nothing sent).
 
         The options need a Space that implements them (``X-Space-Capabilities``
         tokens ``contract-version``, ``keep-billing-period``, ``reject-private``). Before writing,
@@ -102,6 +121,7 @@ class _ContractCalls:
                 keep_billing_period,
                 capabilities=self._capabilities,
                 reject_private=reject_private,
+                idempotency_key=idempotency_key,
             )
         )
 
@@ -149,18 +169,27 @@ class _ContractCalls:
         self,
         group_id: str,
         new_subscription: Subscription,
+        idempotency_key: str | None = None,
     ) -> Result[list[Contract] | None]:
         """Update subscription for every contract in a group.
 
         Args:
             group_id (str): Group identifier.
             new_subscription (Subscription): Subscription update payload.
+            idempotency_key (str | None): ``Idempotency-Key`` of this
+                operation (1 to 255 characters). Default: a new UUID v4, reused
+                on the client's own retries. Pass a key stored with the
+                operation to make retries after a restart safe; Space must then
+                advertise ``idempotency-key`` (``SpaceFeatureUnsupportedError``
+                otherwise, nothing sent).
 
         Returns:
             list[Contract] | None: Updated contracts list on success, otherwise None.
         """
         return self._run(
-            operations.update_contract_subscription_by_group_id(group_id, new_subscription)
+            operations.update_contract_subscription_by_group_id(
+                group_id, new_subscription, idempotency_key
+            )
         )
 
     def update_contract_usage_levels(
@@ -168,6 +197,7 @@ class _ContractCalls:
         user_id: str,
         service_name: str,
         usage_levels_novations: dict[str, int | float],
+        idempotency_key: str | None = None,
     ) -> Result[Contract | None]:
         """Update usage levels for one user service.
 
@@ -175,12 +205,20 @@ class _ContractCalls:
             user_id (str): User identifier.
             service_name (str): Service name used as payload root key.
             usage_levels_novations (dict[str, int | float]): Feature usage deltas by key.
+            idempotency_key (str | None): ``Idempotency-Key`` of this
+                operation (1 to 255 characters). Default: a new UUID v4, reused
+                on the client's own retries. Pass a key stored with the
+                operation to make retries after a restart safe; Space must then
+                advertise ``idempotency-key`` (``SpaceFeatureUnsupportedError``
+                otherwise, nothing sent).
 
         Returns:
             Contract | None: Updated contract on success, otherwise None.
         """
         return self._run(
-            operations.update_contract_usage_levels(user_id, service_name, usage_levels_novations)
+            operations.update_contract_usage_levels(
+                user_id, service_name, usage_levels_novations, idempotency_key
+            )
         )
 
     def remove_contract(self, user_id: str) -> Result[None]:

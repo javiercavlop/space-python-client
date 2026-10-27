@@ -1,6 +1,10 @@
 from .async_space_client import AsyncSpaceClient
 from .errors import (
     ContractChangedError,
+    IdempotencyConflictError,
+    IdempotencyError,
+    IdempotencyInProgressError,
+    IdempotencyKeyInvalidError,
     PricingYamlUnavailableError,
     SpaceApiError,
     SpaceConnectionError,
@@ -14,6 +18,10 @@ from .types.space_connection_options import SpaceConnectionOptions
 __all__ = [
     "AsyncSpaceClient",
     "ContractChangedError",
+    "IdempotencyConflictError",
+    "IdempotencyError",
+    "IdempotencyInProgressError",
+    "IdempotencyKeyInvalidError",
     "PricingYamlUnavailableError",
     "SpaceApiError",
     "SpaceConnectionError",
