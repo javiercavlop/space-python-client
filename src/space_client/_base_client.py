@@ -10,6 +10,7 @@ request is sent, and how the socket is opened.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from .errors import SpaceApiError
@@ -32,7 +33,14 @@ def _read_body(response) -> Any:
             return None
 
 
+def _now() -> float:
+    return time.monotonic()
+
+
 class BaseSpaceClient:
+    CAPABILITIES_TTL_SECONDS = 60
+    """How long the ``X-Space-Capabilities`` of a response are trusted."""
+
     _VALID_EVENTS = {
         SpaceEvent.SYNCHRONIZED.value,
         SpaceEvent.PRICING_CREATED.value,
@@ -65,6 +73,8 @@ class BaseSpaceClient:
         self._api_key = options.api_key
         self._timeout = options.timeout
         self._callbacks: dict[str, Callable[[Any], None]] = {}
+        # The capabilities last advertised by Space, and when (see S0).
+        self._capabilities: tuple[frozenset[str], float] | None = None
 
     # -- events ------------------------------------------------------------
 
@@ -127,6 +137,40 @@ class BaseSpaceClient:
             None: No value is returned.
         """
         self._callbacks.clear()
+
+    # -- capabilities (S0) ----------------------------------------------------
+
+    def _observe_capabilities(self, response: Any) -> None:
+        """Remember what a response says this Space implements.
+
+        A successful answer without ``X-Space-Capabilities`` comes from a Space
+        that predates the header, i.e. one with none of those features. A
+        refusal without it is ignored: it may come from a proxy.
+        """
+        headers = getattr(response, "headers", None)
+        raw = headers.get("x-space-capabilities") if headers is not None else None
+        status = getattr(response, "status_code", 0)
+        if raw is None and not 200 <= status < 400:
+            return
+        tokens = frozenset(
+            token.strip().lower() for token in str(raw or "").split(",") if token.strip()
+        )
+        self._capabilities = (tokens, _now())
+
+    def _cached_capabilities(self) -> frozenset[str] | None:
+        """The capabilities seen less than ``CAPABILITIES_TTL_SECONDS`` ago, or None."""
+        known = self._capabilities
+        if known is None or _now() - known[1] >= self.CAPABILITIES_TTL_SECONDS:
+            return None
+        return known[0]
+
+    def clear_capabilities(self) -> None:
+        """Forget the cached capabilities, e.g. right after upgrading Space.
+
+        Returns:
+            None: The next guarded call asks Space again.
+        """
+        self._capabilities = None
 
     # -- responses ---------------------------------------------------------
 
@@ -197,3 +241,4 @@ class BaseSpaceClient:
     getHttpUrl = get_http_url
     getApiKey = get_api_key
     getTimeout = get_timeout
+    clearCapabilities = clear_capabilities

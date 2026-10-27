@@ -24,6 +24,7 @@ class _ContractCalls:
     """
 
     _run: Any
+    _capabilities: Any
 
     def get_contract(self, user_id: str) -> Result[Contract | None]:
         """Get a contract by user identifier.
@@ -51,7 +52,7 @@ class _ContractCalls:
         self,
         user_id: str,
         new_subscription: Subscription,
-        expected_contract_version: str | None = None,
+        expected_contract_version: str = operations.UNSET,
         keep_billing_period: bool = False,
     ) -> Result[Contract | None]:
         """Update subscription for a single user (novation).
@@ -59,25 +60,44 @@ class _ContractCalls:
         Args:
             user_id (str): User identifier.
             new_subscription (Subscription): Subscription update payload.
-            expected_contract_version (str | None): The ``contract_version`` the
+            expected_contract_version (str): The ``contract_version`` the
                 change was computed on (from ``get_contract``, ``get_pricings`` or
                 ``preview_novation``). Sent as ``If-Match``; if the contract
                 changed meanwhile Space answers 412 and this raises
-                :class:`~space_client.errors.ContractChangedError`. Without it the
-                update is unconditional, as before.
+                :class:`~space_client.errors.ContractChangedError`. Leave it out
+                for an unconditional update, as before; an explicit ``None`` or
+                ``""`` raises ``ValueError`` instead of silently dropping the
+                condition.
             keep_billing_period (bool): Keep the current billing period instead of
                 restarting it (``?keepBillingPeriod=true``). Default: restart.
+
+        Both options need a Space that implements them (``X-Space-Capabilities``
+        tokens ``contract-version`` and ``keep-billing-period``). Before writing,
+        the client checks them - from any recent response, or by reading the
+        contract once, which also lets a stale expected version fail early - and
+        after writing it checks the answer (an ``ETag``; an unchanged billing
+        period start). Without options the request is the single PUT it always
+        was.
 
         Returns:
             Contract | None: Updated contract on success, otherwise None.
 
         Raises:
+            ValueError: ``expected_contract_version`` given but empty.
             ContractChangedError: ``expected_contract_version`` no longer matches.
+            SpaceFeatureUnsupportedError: Space does not implement a requested
+                option. ``written`` is False when nothing was sent, True when
+                Space applied the change without the guarantee (``contract``
+                then holds what it stored).
             SpaceApiError: Any other refusal.
         """
         return self._run(
             operations.update_contract_subscription(
-                user_id, new_subscription, expected_contract_version, keep_billing_period
+                user_id,
+                new_subscription,
+                expected_contract_version,
+                keep_billing_period,
+                capabilities=self._capabilities,
             )
         )
 
@@ -99,6 +119,8 @@ class _ContractCalls:
             user_id (str): User identifier.
             new_subscription (Subscription): The candidate subscription.
             keep_billing_period (bool): Preview keeping the current billing period.
+                Raises ``SpaceFeatureUnsupportedError`` if the Space that answered
+                does not advertise ``keep-billing-period``.
 
         Returns:
             NovationPreview: Validity, errors, the effective subscription,
@@ -106,7 +128,9 @@ class _ContractCalls:
             the current ``contract_version``.
         """
         return self._run(
-            operations.preview_novation(user_id, new_subscription, keep_billing_period)
+            operations.preview_novation(
+                user_id, new_subscription, keep_billing_period, capabilities=self._capabilities
+            )
         )
 
     def update_contract_subscription_by_group_id(

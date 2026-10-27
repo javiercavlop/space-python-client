@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from .._operations import Operation
+from .._operations import Operation, Work
 from ..errors import SpaceApiError
 
 if TYPE_CHECKING:
@@ -36,6 +36,9 @@ class ModuleBase:
     def _cache(self) -> "CacheModule":
         return self._space_client.cache
 
+    def _capabilities(self) -> "frozenset[str] | None":
+        return self._space_client._cached_capabilities()
+
     def _cached(self, operation: Operation[T]) -> T | None:
         """What the cache can answer on its own, if anything.
 
@@ -54,7 +57,18 @@ class ModuleBase:
 
 
 class SyncRunner(ModuleBase):
-    def _run(self, operation: Operation[T]) -> T:
+    def _run(self, work: Work[T]) -> T:
+        if isinstance(work, Operation):
+            return self._run_one(work)
+        # A flow: send each operation, hand its result back, until it returns.
+        try:
+            operation = next(work)
+            while True:
+                operation = work.send(self._run_one(operation))
+        except StopIteration as done:
+            return done.value
+
+    def _run_one(self, operation: Operation[T]) -> T:
         cached = self._cached(operation)
         if cached is not None:
             return cached
@@ -84,7 +98,17 @@ class SyncRunner(ModuleBase):
 
 
 class AsyncRunner(ModuleBase):
-    async def _run(self, operation: Operation[T]) -> T:
+    async def _run(self, work: Work[T]) -> T:
+        if isinstance(work, Operation):
+            return await self._run_one(work)
+        try:
+            operation = next(work)
+            while True:
+                operation = work.send(await self._run_one(operation))
+        except StopIteration as done:
+            return done.value
+
+    async def _run_one(self, operation: Operation[T]) -> T:
         cached = self._cached(operation)
         if cached is not None:
             return cached

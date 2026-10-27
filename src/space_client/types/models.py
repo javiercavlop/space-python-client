@@ -279,7 +279,7 @@ class Contract:
         Returns:
             dict[str, Any]: JSON-serializable contract object.
         """
-        return {
+        result = {
             "id": self.id,
             "_id": self.mongo_id,
             "userContact": self.user_contact.to_dict() if self.user_contact else None,
@@ -297,8 +297,10 @@ class Contract:
             "subscriptionPlans": self.subscription_plans,
             "subscriptionAddOns": self.subscription_add_ons,
             "history": [asdict(entry) for entry in self.history],
-            "contractVersion": self.contract_version,
         }
+        if self.contract_version is not None:
+            result["contractVersion"] = self.contract_version
+        return result
 
 
 @dataclass

@@ -120,7 +120,7 @@ class SpaceClient(BaseSpaceClient):
         """
         url = f"{self._http_url}{path}"
         try:
-            return self._http_client.request(
+            response = self._http_client.request(
                 method,
                 url,
                 headers=self._headers(headers),
@@ -128,6 +128,8 @@ class SpaceClient(BaseSpaceClient):
             )
         except Exception as error:
             raise SpaceConnectionError(f"Could not reach Space at {url}: {error}") from error
+        self._observe_capabilities(response)
+        return response
 
     def _request_json(
         self,

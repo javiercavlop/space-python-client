@@ -143,7 +143,7 @@ class AsyncSpaceClient(BaseSpaceClient):
         """
         url = f"{self._http_url}{path}"
         try:
-            return await self._http_client.request(
+            response = await self._http_client.request(
                 method,
                 url,
                 headers=self._headers(headers),
@@ -151,6 +151,8 @@ class AsyncSpaceClient(BaseSpaceClient):
             )
         except Exception as error:
             raise SpaceConnectionError(f"Could not reach Space at {url}: {error}") from error
+        self._observe_capabilities(response)
+        return response
 
     async def _request_json(
         self,

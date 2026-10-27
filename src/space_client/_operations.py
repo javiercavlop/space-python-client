@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Generator, Generic, TypeVar, Union
 from urllib.parse import quote
 
 from .errors import (
@@ -80,6 +81,44 @@ class Operation(Generic[T]):
     raw: bool = False
     accept: frozenset[int] = frozenset()
     on_refusal: Callable[["CacheModule", SpaceApiError], None] | None = None
+
+
+Flow = Generator[Operation[Any], Any, T]
+"""Several requests that make one call: yields each operation, receives its
+result, returns the call's result. Used when what to ask next depends on the
+previous answer (a capability check before a write). The runners drive it, so
+it too is written once for both clients."""
+
+Work = Union[Operation[T], Flow[T]]
+
+Capabilities = Callable[[], "frozenset[str] | None"]
+"""The ``X-Space-Capabilities`` tokens this client saw recently, or None when
+it has to ask again (see ``BaseSpaceClient.CAPABILITIES_TTL_SECONDS``)."""
+
+
+def _no_capabilities() -> "frozenset[str] | None":
+    return None
+
+
+# S0 tokens the client depends on.
+PRICING_YAML = "pricing-yaml"
+CONTRACT_VERSION = "contract-version"
+KEEP_BILLING_PERIOD = "keep-billing-period"
+
+_OPTION_OF = {
+    CONTRACT_VERSION: "expected_contract_version (If-Match)",
+    KEEP_BILLING_PERIOD: "keep_billing_period",
+}
+
+
+class _Unset:
+    """Default of ``expected_contract_version``: told apart from an explicit None."""
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET: Any = _Unset()
 
 
 def _segment(value: str) -> str:
@@ -149,12 +188,114 @@ def add_contract(contract_to_create: ContractToCreate) -> Operation[Contract | N
 def update_contract_subscription(
     user_id: str,
     new_subscription: Subscription,
-    expected_contract_version: str | None = None,
+    expected_contract_version: Any = UNSET,
     keep_billing_period: bool = False,
+    capabilities: Capabilities = _no_capabilities,
+) -> Work[Contract | None]:
+    """The novation, guarded when the caller asked for a guarantee (S0).
+
+    Without options it is the single PUT it always was. With
+    ``expected_contract_version`` or ``keep_billing_period`` the client first
+    makes sure Space advertises ``contract-version`` / ``keep-billing-period``
+    (reading the contract once when it does not know), refuses without writing
+    if it does not, and checks the answer for signs the option was ignored.
+    """
+    conditional = expected_contract_version is not UNSET
+    if conditional and (not isinstance(expected_contract_version, str) or not expected_contract_version):
+        # None here is almost always a version that was never known (a
+        # preview from an old Space): sending no If-Match would turn a
+        # conditional update into an unconditional one. Raised from the flow,
+        # so the async client raises it when awaited, like any other error.
+        return _refuse_empty_version()
+    expected: str | None = expected_contract_version if conditional else None
+
+    required = [
+        capability
+        for capability, wanted in ((CONTRACT_VERSION, conditional), (KEEP_BILLING_PERIOD, keep_billing_period))
+        if wanted
+    ]
+    if not required:
+        return _novation_put(user_id, new_subscription, None, False)
+    return _guarded_novation(user_id, new_subscription, expected, keep_billing_period, required, capabilities)
+
+
+def _refuse_empty_version() -> Flow[Contract | None]:
+    raise ValueError(
+        "expected_contract_version must be a non-empty contract version; "
+        "leave it out for an unconditional update"
+    )
+    yield  # pragma: no cover - makes this a generator
+
+
+def _guarded_novation(
+    user_id: str,
+    new_subscription: Subscription,
+    expected: str | None,
+    keep_billing_period: bool,
+    required: list[str],
+    capabilities: Capabilities,
+) -> Flow[Contract | None]:
+    before: Contract | None = None
+    known = capabilities()
+    if known is None:
+        # The answer carries the capabilities, and its ETag lets a stale
+        # expected version fail before anything is written.
+        before = yield _novation_probe(user_id, expected, required, capabilities)
+    else:
+        _require(required, known)
+    return (
+        yield _novation_put(user_id, new_subscription, expected, keep_billing_period, before)
+    )
+
+
+def _require(required: list[str], known: "frozenset[str]") -> None:
+    for capability in required:
+        if capability not in known:
+            raise SpaceFeatureUnsupportedError(
+                capability,
+                f"The connected Space does not support {_OPTION_OF[capability]}: nothing was written",
+            )
+
+
+def _novation_probe(
+    user_id: str, expected: str | None, required: list[str], capabilities: Capabilities
+) -> Operation[Contract]:
+    path = f"/contracts/{user_id}"
+
+    def parse(cache: "CacheModule", response: Any) -> Contract:
+        _require(required, capabilities() or frozenset())
+        payload = _decode(response)
+        payload = payload if isinstance(payload, dict) else {}
+        etag = _response_headers(response).get("etag")
+        current = _unquote_etag(etag) if etag else payload.get("contractVersion")
+        if expected is not None and current is not None and current != _unquote_etag(expected):
+            # Early and not atomic; If-Match on the PUT stays the real check.
+            if cache.is_enabled():
+                cache.invalidate_user(user_id)
+            raise ContractChangedError(
+                412,
+                "GET",
+                path,
+                {"error": ContractChangedError.code, "contractVersion": current},
+                user_id=user_id,
+                expected_contract_version=expected,
+                contract_version=current,
+            )
+        return Contract.from_dict(payload)
+
+    return Operation("GET", path, raw=True, parse=parse)
+
+
+def _novation_put(
+    user_id: str,
+    new_subscription: Subscription,
+    expected: str | None,
+    keep_billing_period: bool,
+    before: Contract | None = None,
 ) -> Operation[Contract | None]:
     headers: dict[str, str] | None = None
-    if expected_contract_version is not None:
-        headers = {"If-Match": _quote_etag(expected_contract_version)}
+    if expected is not None:
+        headers = {"If-Match": _quote_etag(expected)}
 
     replace = _replace_one(user_id)
 
@@ -164,6 +305,20 @@ def update_contract_subscription(
         etag = _response_headers(response).get("etag")
         if isinstance(payload, dict) and payload.get("contractVersion") is None and etag:
             payload = {**payload, "contractVersion": _unquote_etag(etag)}
+        if expected is not None or keep_billing_period:
+            ignored = _ignored_option(expected, keep_billing_period, etag, payload, before)
+            if ignored is not None:
+                # Space wrote the novation without the guarantee. Say so, and
+                # keep nothing cached for a contract in a state nobody chose.
+                if cache.is_enabled():
+                    cache.invalidate_user(user_id)
+                capability, message = ignored
+                raise SpaceFeatureUnsupportedError(
+                    capability,
+                    message,
+                    written=True,
+                    contract=Contract.from_dict(payload) if isinstance(payload, dict) else None,
+                )
         return replace(cache, payload)
 
     def on_refusal(cache: "CacheModule", error: SpaceApiError) -> None:
@@ -171,7 +326,7 @@ def update_contract_subscription(
             # Whatever we hold for this user is known to be stale.
             if cache.is_enabled():
                 cache.invalidate_user(user_id)
-            raise ContractChangedError.from_error(error, user_id, expected_contract_version)
+            raise ContractChangedError.from_error(error, user_id, expected)
 
     # The path is left unescaped, as it always was for this call, so that
     # callers relying on the old URL see no change.
@@ -186,10 +341,58 @@ def update_contract_subscription(
     )
 
 
+def _ignored_option(
+    expected: str | None,
+    keep_billing_period: bool,
+    etag: str | None,
+    payload: Any,
+    before: Contract | None,
+) -> tuple[str, str] | None:
+    """Post-write backstop: does the stored contract show an option was ignored?"""
+    if expected is not None and not etag:
+        return (
+            CONTRACT_VERSION,
+            "Space applied the novation without an ETag: If-Match (expected_contract_version) "
+            "was not enforced",
+        )
+    if keep_billing_period and isinstance(payload, dict):
+        after = Contract.from_dict(payload)
+        previous = before.billing_period.start_date if before and before.billing_period else None
+        if previous is None and after.history:
+            # Space records the replaced period in the history entry it pushes.
+            previous = after.history[-1].start_date
+        current = after.billing_period.start_date if after.billing_period else None
+        if previous is not None and current is not None and not _same_instant(previous, current):
+            return (
+                KEEP_BILLING_PERIOD,
+                "Space applied the novation but restarted the billing period "
+                "(keep_billing_period was ignored)",
+            )
+    return None
+
+
+def _same_instant(a: Any, b: Any) -> bool:
+    def parse(value: Any) -> Any:
+        if isinstance(value, datetime):
+            moment = value
+        else:
+            try:
+                moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return str(value)
+        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+    first, second = parse(a), parse(b)
+    if isinstance(first, datetime) and isinstance(second, datetime):
+        return first == second
+    return str(a) == str(b)
+
+
 def preview_novation(
     user_id: str,
     new_subscription: Subscription,
     keep_billing_period: bool = False,
+    capabilities: Capabilities = _no_capabilities,
 ) -> Operation[NovationPreview]:
     body = new_subscription.to_dict()
     if not body.get("contractedServices"):
@@ -198,6 +401,12 @@ def preview_novation(
 
     # A dry run writes nothing, so it leaves the cache alone.
     def parse(_cache: "CacheModule", payload: Any) -> NovationPreview:
+        if keep_billing_period and KEEP_BILLING_PERIOD not in (capabilities() or frozenset()):
+            # The preview would describe a restart the caller asked to avoid.
+            raise SpaceFeatureUnsupportedError(
+                KEEP_BILLING_PERIOD,
+                "The connected Space does not support keep_billing_period: the preview ignored it",
+            )
         return NovationPreview.from_dict(payload if isinstance(payload, dict) else {})
 
     return Operation(
@@ -321,7 +530,7 @@ def get_pricing_yaml(
             # Space without S2 ignores ?format=yaml and answers with the JSON
             # pricing: that is not the file, so do not hand it out as one.
             raise SpaceFeatureUnsupportedError(
-                "pricing-yaml",
+                PRICING_YAML,
                 f"Space answered {media_type or 'without a Content-Type'} for "
                 f"{service_name}@{pricing_version}: this Space version does not support "
                 "format=yaml",

@@ -208,7 +208,7 @@ local registry. Supports `async with`.
 |---|---|
 | `get_contract(user_id)` | `Contract | None` |
 | `add_contract(contract_to_create)` | `Contract | None` |
-| `update_contract_subscription(user_id, new_subscription, expected_contract_version=None, keep_billing_period=False)` | `Contract | None` |
+| `update_contract_subscription(user_id, new_subscription, expected_contract_version=<unset>, keep_billing_period=False)` | `Contract | None` |
 | `update_contract_subscription_by_group_id(group_id, new_subscription)` | `list[Contract] | None` |
 | `update_contract_usage_levels(user_id, service_name, usage_levels_novations)` | `Contract | None` |
 | `remove_contract(user_id)` | `None` |
@@ -259,7 +259,7 @@ on. If anything changed the contract in between, Space refuses with 412 and the
 client raises `ContractChangedError` instead of overwriting it:
 
 ```python
-from space_client import ContractChangedError
+from space_client import ContractChangedError, SpaceFeatureUnsupportedError
 from space_client.types import NovationErrorCode, Subscription
 
 change = Subscription(
@@ -284,17 +284,50 @@ else:
 		)
 	except ContractChangedError as changed:
 		print("Changed meanwhile; current version is", changed.contract_version)
+	except SpaceFeatureUnsupportedError as unsupported:
+		# This Space cannot honour the option (unsupported.capability).
+		if unsupported.written:
+			...  # the change WAS applied without the guarantee: unsupported.contract
+		else:
+			...  # nothing was written
 ```
 
 - `preview_novation` writes nothing and leaves the cache alone. An invalid
   change is an answer (`valid=False`, `errors`), not an exception. Unknown error
   codes are kept as strings.
-- `expected_contract_version` is sent as `If-Match`. Without it the update is
-  unconditional, exactly as before.
+- `expected_contract_version` is sent as `If-Match`. Leave it out for an
+  unconditional update, exactly as before. Passing `None` or `""` raises
+  `ValueError` without sending anything: a version that was never known must not
+  quietly turn a conditional update into an unconditional one.
 - `keep_billing_period=True` sends `?keepBillingPeriod=true`: history is still
   recorded but the billing period is not restarted.
 - `Contract.contract_version` is filled from the body or, failing that, from the
   `ETag` of the update response. It is `None` on Space versions without it.
+
+> **Older Space versions.** A Space without optimistic concurrency ignores
+> `If-Match`, and one without `keepBillingPeriod` ignores the query and restarts
+> the billing period. So the client does not trust the options blindly. When
+> `expected_contract_version` or `keep_billing_period` is set:
+>
+> - **Before writing** it checks the `X-Space-Capabilities` header for
+>   `contract-version` / `keep-billing-period`. The header is read from any
+>   Space response and cached per client for `CAPABILITIES_TTL_SECONDS` (60 s;
+>   `client.clear_capabilities()` forgets it). When nothing recent is known, it
+>   reads the contract once. If a token is missing it raises
+>   `SpaceFeatureUnsupportedError` (`capability`, `written=False`) and **writes
+>   nothing**. If that read's `ETag` already differs from
+>   `expected_contract_version` it raises `ContractChangedError` early;
+>   `If-Match` on the PUT is still the atomic check.
+> - **After writing** it raises `SpaceFeatureUnsupportedError` with
+>   `written=True` and the stored `contract` if the answer shows the option was
+>   ignored anyway: no `ETag` with `expected_contract_version`, or a different
+>   `billingPeriod.startDate` with `keep_billing_period`. The user's cache
+>   entries are dropped.
+> - `preview_novation(..., keep_billing_period=True)` raises the same error when
+>   the Space that answered does not advertise `keep-billing-period`.
+>
+> Without options nothing is checked and the request is the same single PUT
+> as before.
 
 `get_yaml` raises `PricingYamlUnavailableError` (a `SpaceApiError`) when Space
 knows the version but no longer has its original file. `get_pricings` is never
@@ -403,12 +436,18 @@ client.connect()
 - `SpaceFeatureUnsupportedError` (a `SpaceError`, not a `SpaceApiError`) means
   the connected Space lacks a feature the call depends on; `capability` names
   it with its `X-Space-Capabilities` token (e.g. `pricing-yaml` when `get_yaml`
-  receives JSON from a Space that ignores `format=yaml`).
+  receives JSON from a Space that ignores `format=yaml`). `written` says
+  whether Space changed anything.
 - `contracts.update_contract_subscription(..., expected_contract_version=...)`
   raises `ContractChangedError`, a subclass of `SpaceApiError`, when the
   contract changed since that version (HTTP 412). It carries `user_id`,
   `expected_contract_version` and the current `contract_version`, and the
   user's cached entries are invalidated.
+- With `expected_contract_version` or `keep_billing_period`, the same call
+  raises `SpaceFeatureUnsupportedError` when the connected Space does not
+  implement the option (`written=False`, nothing sent) or applied the change
+  without honouring it (`written=True`, `contract` set). An explicit empty
+  `expected_contract_version` raises `ValueError`.
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 
