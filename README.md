@@ -255,6 +255,13 @@ if again.not_modified:
 knows the version but no longer has its original file. `get_pricings` is never
 served from cache: its `contract_version` matters only while it is current.
 
+> **Older Space versions.** These calls need a Space with the subscription-change
+> API. Without it, `get_pricings` and `get_new_contracts_pricing` get Space's
+> 404 (`SpaceApiError`). An older Space ignores `?format=yaml` and answers with
+> the JSON pricing; `get_yaml` then raises `SpaceFeatureUnsupportedError`
+> (`capability == "pricing-yaml"`) rather than returning JSON as if it were the
+> file: only `application/yaml`, `text/yaml` and their `x-` variants are accepted.
+
 ### FeatureModule
 
 | Method | Returns |
@@ -346,6 +353,10 @@ client.connect()
 - A request that never arrived raises `SpaceConnectionError`.
 - `pricings.get_yaml(...)` raises `PricingYamlUnavailableError`, a subclass of
   `SpaceApiError`, when Space cannot provide the original Pricing2Yaml file.
+- `SpaceFeatureUnsupportedError` (a `SpaceError`, not a `SpaceApiError`) means
+  the connected Space lacks a feature the call depends on; `capability` names
+  it with its `X-Space-Capabilities` token (e.g. `pricing-yaml` when `get_yaml`
+  receives JSON from a Space that ignores `format=yaml`).
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 

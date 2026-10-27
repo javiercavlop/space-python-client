@@ -77,6 +77,39 @@ def _describe(payload: Any) -> str:
     return text[:500]
 
 
+class SpaceFeatureUnsupportedError(SpaceError):
+    """The connected Space does not implement a feature the call depends on.
+
+    Raised instead of quietly doing something else: returning the JSON pricing
+    as if it were the YAML file, or writing a novation without the guarantee
+    the caller asked for. ``capability`` is the ``X-Space-Capabilities`` token
+    of the missing feature (``pricing-yaml``, ``contract-version``,
+    ``keep-billing-period``...).
+
+    ``written`` says whether Space changed anything. It is False when the
+    client refused before sending a write (or for a read); it is True only for
+    the post-write backstop, when the response shows that Space applied a
+    novation without the guarantee - the change is then in place and
+    ``contract`` holds what Space answered.
+
+    Not a :class:`SpaceApiError`: Space did not refuse anything.
+    """
+
+    code = "SPACE_FEATURE_UNSUPPORTED"
+
+    def __init__(
+        self,
+        capability: str,
+        message: str | None = None,
+        written: bool = False,
+        contract: Any = None,
+    ):
+        self.capability = capability
+        self.written = written
+        self.contract = contract
+        super().__init__(message or f'The connected Space does not support "{capability}"')
+
+
 class PricingYamlUnavailableError(SpaceApiError):
     """Space knows the pricing version but cannot hand out its original file.
 

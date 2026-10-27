@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 from urllib.parse import quote
 
-from .errors import PricingYamlUnavailableError, SpaceApiError
+from .errors import PricingYamlUnavailableError, SpaceApiError, SpaceFeatureUnsupportedError
 from .types.models import (
     Contract,
     ContractPricings,
@@ -211,6 +211,16 @@ def _replace_one(user_id: str) -> Callable[["CacheModule", Any], Contract | None
 # --------------------------------------------------------------------------
 
 
+_YAML_MEDIA_TYPES = frozenset(
+    {"application/yaml", "text/yaml", "application/x-yaml", "text/x-yaml"}
+)
+
+
+def _media_type(response: Any) -> str:
+    content_type = response.headers.get("content-type") or ""
+    return content_type.split(";", 1)[0].strip().lower()
+
+
 def get_pricing_yaml(
     service_name: str, pricing_version: str, etag: str | None = None
 ) -> Operation[PricingYaml]:
@@ -227,6 +237,16 @@ def get_pricing_yaml(
                 etag=received_etag or (_quote_etag(etag) if etag else None),
                 syntax_version=syntax_version,
                 not_modified=True,
+            )
+        media_type = _media_type(response)
+        if media_type not in _YAML_MEDIA_TYPES:
+            # Space without S2 ignores ?format=yaml and answers with the JSON
+            # pricing: that is not the file, so do not hand it out as one.
+            raise SpaceFeatureUnsupportedError(
+                "pricing-yaml",
+                f"Space answered {media_type or 'without a Content-Type'} for "
+                f"{service_name}@{pricing_version}: this Space version does not support "
+                "format=yaml",
             )
         return PricingYaml(
             yaml=response.text,

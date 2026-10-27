@@ -14,7 +14,12 @@ import pytest
 import respx
 from conftest import API_URL
 
-from space_client import PricingYamlUnavailableError, SpaceApiError
+from space_client import (
+    PricingYamlUnavailableError,
+    SpaceApiError,
+    SpaceError,
+    SpaceFeatureUnsupportedError,
+)
 from space_client.types import ContractPricings, NewContractsPricing, PricingYaml
 
 YAML = (
@@ -77,7 +82,7 @@ def test_get_yaml_with_a_known_etag_is_a_conditional_request(space):
 def test_get_yaml_escapes_path_segments(space):
     client, call = space
     route = respx.get(url__regex=r".*/services/my%20svc/pricings/v1%2F2\?format=yaml$").mock(
-        return_value=httpx.Response(200, content=b"x: 1\n")
+        return_value=httpx.Response(200, content=b"x: 1\n", headers={"Content-Type": "text/yaml"})
     )
 
     result = call(client.pricings.get_yaml("my svc", "v1/2"))
@@ -85,6 +90,43 @@ def test_get_yaml_escapes_path_segments(space):
     assert route.called
     assert result.yaml == "x: 1\n"
     assert result.etag is None and result.syntax_version is None
+
+
+@pytest.mark.parametrize(
+    "content_type", ["application/yaml", "text/yaml; charset=utf-8", "application/x-yaml"]
+)
+@respx.mock
+def test_get_yaml_accepts_the_yaml_media_types(space, content_type):
+    client, call = space
+    respx.get(f"{API_URL}/services/acme/pricings/1.0").mock(
+        return_value=httpx.Response(200, content=YAML.encode(), headers={"Content-Type": content_type})
+    )
+
+    assert call(client.pricings.get_yaml("acme", "1.0")).yaml == YAML
+
+
+@pytest.mark.parametrize("content_type", ["application/json; charset=utf-8", None])
+@respx.mock
+def test_get_yaml_from_an_old_space_that_ignores_format_raises_feature_unsupported(
+    space, content_type
+):
+    # A Space without S2 ignores ?format=yaml and answers 200 with the JSON
+    # pricing. Handing that out as YAML would be wrong, so the client refuses.
+    client, call = space
+    headers = {"Content-Type": content_type} if content_type else {}
+    respx.get(f"{API_URL}/services/acme/pricings/1.0").mock(
+        return_value=httpx.Response(200, content=b'{"saasName": "Acme"}', headers=headers)
+    )
+
+    with pytest.raises(SpaceFeatureUnsupportedError) as caught:
+        call(client.pricings.get_yaml("acme", "1.0"))
+
+    error = caught.value
+    assert error.capability == "pricing-yaml"
+    assert error.code == "SPACE_FEATURE_UNSUPPORTED"
+    assert error.written is False
+    assert isinstance(error, SpaceError) and not isinstance(error, SpaceApiError)
+    assert "format=yaml" in str(error)
 
 
 @respx.mock
