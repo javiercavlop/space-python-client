@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import socketio
@@ -66,16 +66,41 @@ class SpaceClient(BaseSpaceClient):
 
         Returns:
             None: Connection is attempted asynchronously; failures are ignored.
+            Joins ``/contracts`` too when a contract event listener is registered.
         """
-        if self._socket.connected:
+        if self._socket_is_current():
             return
         try:
-            self._socket.connect(
-                self._ws_url(), namespaces=["/pricings"], socketio_path="events", wait=False
-            )
+            if self._socket.connected:
+                # A namespace is being added: python-socketio joins namespaces
+                # when it connects, so connect again with the new set.
+                self._socket.disconnect()
+            arguments = self._connect_arguments()
+            self._socket.connect(self._ws_url(), **arguments)
+            self._socket_namespaces = arguments["namespaces"]
         except Exception:
             # The client should still be usable in HTTP-only mode.
             return
+
+    def on(self, event: str, callback: Callable[[Any], None]) -> None:
+        """Register an event listener callback.
+
+        Registering the first contract event (``contract_created``,
+        ``contract_novated``, ``contract_deleted``, ``contract_renewed``) joins
+        the authenticated ``/contracts`` namespace, reconnecting the socket if
+        it was open. The affected user's cache entries are invalidated before
+        a contract callback runs.
+
+        Args:
+            event (str): Event name (see :meth:`BaseSpaceClient.on`).
+            callback (Callable[[Any], None]): Function invoked with event payload.
+
+        Returns:
+            None: Listener registration updates internal callback registry.
+        """
+        super().on(event, callback)
+        if event.lower() in self._CONTRACT_EVENTS and self._socket_namespaces:
+            self.connect()
 
     def disconnect(self) -> None:
         """Close active WebSocket connection.
@@ -86,6 +111,7 @@ class SpaceClient(BaseSpaceClient):
         try:
             if self._socket.connected:
                 self._socket.disconnect()
+            self._socket_namespaces = []
         except Exception:
             return
 

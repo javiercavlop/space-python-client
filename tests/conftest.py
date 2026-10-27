@@ -17,6 +17,8 @@ class FakeSocketClient:
     def __init__(self, *args, **kwargs):
         self.connected = False
         self._handlers: dict[tuple[str, str | None], callable] = {}
+        self.connect_calls: list[dict] = []
+        self.disconnect_calls = 0
 
     def on(self, event: str, namespace: str | None = None):
         def decorator(func):
@@ -26,9 +28,11 @@ class FakeSocketClient:
         return decorator
 
     def connect(self, *args, **kwargs):
+        self.connect_calls.append(kwargs)
         self.connected = True
 
     def disconnect(self):
+        self.disconnect_calls += 1
         self.connected = False
 
     def trigger(self, event: str, data=None, namespace: str | None = "/pricings"):
@@ -45,10 +49,18 @@ class FakeAsyncSocketClient(FakeSocketClient):
     """The same stub, with the two methods the async socket awaits."""
 
     async def connect(self, *args, **kwargs):  # type: ignore[override]
+        self.connect_calls.append(kwargs)
         self.connected = True
 
     async def disconnect(self):  # type: ignore[override]
+        self.disconnect_calls += 1
         self.connected = False
+
+    async def trigger_async(self, event: str, data=None, namespace: str | None = "/pricings"):
+        handler = self._handlers[(event, namespace)]
+        result = handler() if data is None else handler(data)
+        if inspect.isawaitable(result):
+            await result
 
 
 @pytest.fixture(autouse=True)

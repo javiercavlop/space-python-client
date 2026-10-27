@@ -17,6 +17,7 @@ Python client library for [Space](https://github.com/isa-group/space), a pricing
 - [Data Models](#data-models)
 - [Caching](#caching)
 - [WebSocket Events](#websocket-events)
+- [Pricing Tokens](#pricing-tokens)
 - [Error Handling](#error-handling)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -33,7 +34,8 @@ Python client library for [Space](https://github.com/isa-group/space), a pricing
 - Pricing reads for pricing pages: the raw Pricing2Yaml of a version, the
   versions of a user's contract, and the version new contracts get.
 - Built-in in-memory cache and optional Redis cache.
-- WebSocket events for real-time pricing updates.
+- WebSocket events for real-time pricing updates, and contract events for the
+  API key's organisation.
 
 ## Requirements
 
@@ -365,6 +367,7 @@ Main model classes are exported from `space_client.types`:
 - `PricingYaml`, `ContractPricings`, `ContractServicePricing`, `NewContractsPricing`
 - `NovationPreview`, `NovationError`, `NovationErrorCode`, `NovationVersionChange`,
   `NovationUsageWarning`, `NovationBillingPeriod`
+- `PricingTokenPayload`, `PricingTokenSubscription`, `decode_pricing_token`
 - `FeatureEvaluationResult`, `EvaluationError`
 - `BillingPeriod`, `BillingPeriodToCreate`, `ContractHistoryEntry`, `UsageLevel`, `UserContact`
 - `SpaceEvent`
@@ -417,6 +420,7 @@ Supported event names:
 - `pricing_archived`
 - `pricing_actived`
 - `service_disabled`
+- `contract_created`, `contract_novated`, `contract_deleted`, `contract_renewed`
 - `error`
 
 Example:
@@ -429,6 +433,52 @@ def on_pricing_created(details):
 client.on("pricing_created", on_pricing_created)
 client.connect()
 ```
+
+### Contract events
+
+Contract events arrive on the authenticated `/contracts` namespace, and only for
+contracts of the API key's organisation. The client joins it (sending the key as
+Socket.IO `auth: {"apiKey": ...}` and as the `x-api-key` header) once a contract
+listener is registered:
+
+```python
+def on_novated(details):
+	# {"userId", "organizationId", "contractVersion", "services": [...]}
+	print("Contract changed:", details["userId"], details["contractVersion"])
+
+
+client.on("contract_novated", on_novated)
+```
+
+- The cached entries of `details["userId"]` are invalidated before the callback
+  runs, so a callback that re-reads the contract or a pricing token gets fresh
+  data.
+- The sync client reconnects its socket to add the namespace when the first
+  contract listener is registered. `AsyncSpaceClient.on` cannot await, so
+  register contract listeners before `connect()` / `async with`, or call
+  `await client.connect()` again afterwards.
+- A key Space refuses on `/contracts` is reported to the `error` listener.
+- Removing the last contract listener does not close the namespace; its events
+  are simply dropped until a listener is registered again.
+
+## Pricing Tokens
+
+`features.generate_user_pricing_token(user_id)` returns a JWT signed by Space.
+To read it on the backend - for example to know the user's current
+subscription and `contract_version` - decode it:
+
+```python
+from space_client.types import decode_pricing_token
+
+payload = decode_pricing_token(client.features.generate_user_pricing_token("user-123"))
+if payload.subscription is not None:  # None for tokens from older Space versions
+	print(payload.subscription.contracted_services)
+	print(payload.subscription.subscription_plans, payload.subscription.subscription_add_ons)
+	print(payload.subscription.contract_version)
+```
+
+`decode_pricing_token` does **not** verify the signature: use it to read a token
+you just received from Space, never to authenticate one a client sent you.
 
 ## Error Handling
 

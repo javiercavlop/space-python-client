@@ -37,10 +37,22 @@ def _now() -> float:
     return time.monotonic()
 
 
+PRICINGS_NAMESPACE = "/pricings"
+CONTRACTS_NAMESPACE = "/contracts"
+
+
 class BaseSpaceClient:
     CAPABILITIES_TTL_SECONDS = 60
     """How long the ``X-Space-Capabilities`` of a response are trusted."""
 
+    _CONTRACT_EVENTS = frozenset(
+        {
+            SpaceEvent.CONTRACT_CREATED.value,
+            SpaceEvent.CONTRACT_NOVATED.value,
+            SpaceEvent.CONTRACT_DELETED.value,
+            SpaceEvent.CONTRACT_RENEWED.value,
+        }
+    )
     _VALID_EVENTS = {
         SpaceEvent.SYNCHRONIZED.value,
         SpaceEvent.PRICING_CREATED.value,
@@ -48,6 +60,7 @@ class BaseSpaceClient:
         SpaceEvent.PRICING_ACTIVED.value,
         SpaceEvent.SERVICE_DISABLED.value,
         SpaceEvent.ERROR.value,
+        *_CONTRACT_EVENTS,
     }
 
     def __init__(self, options: SpaceConnectionOptions) -> None:
@@ -75,6 +88,11 @@ class BaseSpaceClient:
         self._callbacks: dict[str, Callable[[Any], None]] = {}
         # The capabilities last advertised by Space, and when (see S0).
         self._capabilities: tuple[frozenset[str], float] | None = None
+        self._socket: Any = None
+        self.cache: Any = None
+        # The namespaces the socket was last connected with: adding one to a
+        # python-socketio connection means connecting again.
+        self._socket_namespaces: list[str] = []
 
     # -- events ------------------------------------------------------------
 
@@ -91,6 +109,9 @@ class BaseSpaceClient:
                 return
             code = str(data.get("code", "")).lower()
             details = data.get("details")
+            if code in self._CONTRACT_EVENTS:
+                # Contract events come only from the authenticated namespace.
+                return
             callback = self._callbacks.get(code)
             if callback is not None:
                 callback(details)
@@ -101,13 +122,71 @@ class BaseSpaceClient:
             if callback is not None:
                 callback(error)
 
+        @self._socket.on("message", namespace=CONTRACTS_NAMESPACE)
+        def _on_contract_message(data: Any) -> None:
+            if not isinstance(data, dict):
+                return
+            code = str(data.get("code", "")).lower()
+            details = data.get("details")
+            # Whatever we cached for that user is stale now; drop it before
+            # the callback runs, so a callback that re-reads gets fresh data.
+            user_id = details.get("userId") if isinstance(details, dict) else None
+            if user_id and self.cache is not None:
+                self.cache.invalidate_user(str(user_id))
+            if code not in self._CONTRACT_EVENTS:
+                return
+            callback = self._callbacks.get(code)
+            if callback is not None:
+                callback(details)
+
+        @self._socket.on("connect_error", namespace=CONTRACTS_NAMESPACE)
+        def _on_contract_connect_error(error: Any) -> None:
+            callback = self._callbacks.get(SpaceEvent.ERROR.value)
+            if callback is not None:
+                callback(error)
+
+    def _has_contract_listeners(self) -> bool:
+        return any(event in self._callbacks for event in self._CONTRACT_EVENTS)
+
+    def _wanted_namespaces(self) -> list[str]:
+        if self._has_contract_listeners():
+            return [PRICINGS_NAMESPACE, CONTRACTS_NAMESPACE]
+        return [PRICINGS_NAMESPACE]
+
+    def _socket_is_current(self) -> bool:
+        return bool(self._socket.connected) and set(self._wanted_namespaces()) <= set(
+            self._socket_namespaces
+        )
+
+    def _connect_arguments(self) -> dict[str, Any]:
+        """What ``socket.connect`` is called with.
+
+        ``/contracts`` only answers authenticated callers: the API key goes in
+        the Socket.IO ``auth`` payload and, for servers that read the
+        handshake, the ``x-api-key`` header. ``/pricings`` stays anonymous
+        unless contracts are wanted too, since both share one connection.
+        """
+        namespaces = self._wanted_namespaces()
+        arguments: dict[str, Any] = {
+            "namespaces": namespaces,
+            "socketio_path": "events",
+            "wait": False,
+        }
+        if CONTRACTS_NAMESPACE in namespaces:
+            arguments["auth"] = {"apiKey": self._api_key}
+            arguments["headers"] = {"x-api-key": self._api_key}
+        return arguments
+
     def on(self, event: str, callback: Callable[[Any], None]) -> None:
         """Register an event listener callback.
 
         Args:
             event (str): Event name. Supported values include synchronized,
                 pricing_created, pricing_archived, pricing_actived,
-                service_disabled, and error.
+                service_disabled, contract_created, contract_novated,
+                contract_deleted, contract_renewed, and error. Contract events
+                are received on the authenticated ``/contracts`` namespace, only
+                for the API key's organisation.
             callback (Callable[[Any], None]): Function invoked with event payload.
 
         Returns:

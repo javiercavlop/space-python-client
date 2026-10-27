@@ -88,13 +88,20 @@ class AsyncSpaceClient(BaseSpaceClient):
 
         Returns:
             None: Failures are ignored, leaving the client usable over HTTP.
+            Joins ``/contracts`` too when a contract event listener is
+            registered; ``on`` cannot await, so register contract listeners
+            before connecting, or call ``connect()`` again afterwards.
         """
-        if self._socket.connected:
+        if self._socket_is_current():
             return
         try:
-            await self._socket.connect(
-                self._ws_url(), namespaces=["/pricings"], socketio_path="events", wait=False
-            )
+            if self._socket.connected:
+                # A namespace is being added: python-socketio joins namespaces
+                # when it connects, so connect again with the new set.
+                await self._socket.disconnect()
+            arguments = self._connect_arguments()
+            await self._socket.connect(self._ws_url(), **arguments)
+            self._socket_namespaces = arguments["namespaces"]
         except Exception:
             # The client should still be usable in HTTP-only mode.
             return
@@ -108,6 +115,7 @@ class AsyncSpaceClient(BaseSpaceClient):
         try:
             if self._socket.connected:
                 await self._socket.disconnect()
+            self._socket_namespaces = []
         except Exception:
             return
 
