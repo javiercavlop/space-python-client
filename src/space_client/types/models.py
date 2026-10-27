@@ -340,14 +340,105 @@ class Subscription:
         }
 
 
+@dataclass
+class PricingYaml:
+    """The raw Pricing2Yaml file of a pricing version, as Space stores it.
+
+    Attributes:
+        yaml: The file, byte for byte (decoded as UTF-8). ``None`` when
+            ``not_modified`` is True.
+        etag: The strong ETag of the file (``"<sha256 hex>"``), or None.
+        syntax_version: The file's ``syntaxVersion`` (header
+            ``X-Pricing-Syntax-Version``), or None.
+        not_modified: True when the ``etag`` passed in still matches (HTTP 304).
+    """
+
+    yaml: str | None
+    etag: str | None = None
+    syntax_version: str | None = None
+    not_modified: bool = False
+
+
+@dataclass
+class ContractServicePricing:
+    """The pricing version a contract holds for one of its services."""
+
+    version: str
+    status: str
+    yaml_url: str
+    new_contracts_version: str | None = None
+    plan: str | None = None
+    add_ons: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ContractServicePricing":
+        payload = data or {}
+        return cls(
+            version=str(payload.get("version", "")),
+            status=str(payload.get("status", "")),
+            yaml_url=str(payload.get("yamlUrl", "")),
+            new_contracts_version=payload.get("newContractsVersion"),
+            plan=payload.get("plan"),
+            add_ons=dict(payload.get("addOns") or {}),
+        )
+
+
+@dataclass
+class ContractPricings:
+    """Answer of ``GET /contracts/{userId}/pricings``.
+
+    ``contract_version`` is opaque; pass it as ``expected_contract_version``
+    when applying a change computed from this answer.
+    """
+
+    services: dict[str, ContractServicePricing] = field(default_factory=dict)
+    contract_version: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ContractPricings":
+        payload = data or {}
+        return cls(
+            services={
+                name: ContractServicePricing.from_dict(item)
+                for name, item in dict(payload.get("services") or {}).items()
+            },
+            contract_version=payload.get("contractVersion"),
+        )
+
+
+@dataclass
+class NewContractsPricing:
+    """Answer of ``GET /services/{s}/pricings/new-contracts``.
+
+    ``source`` is ``"sphere-policy"``, ``"default"`` or ``"latest-active"``.
+    """
+
+    version: str
+    yaml_url: str
+    source: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "NewContractsPricing":
+        payload = data or {}
+        return cls(
+            version=str(payload.get("version", "")),
+            yaml_url=str(payload.get("yamlUrl", "")),
+            source=str(payload.get("source", "")),
+        )
+
+
 __all__ = [
     "BillingPeriod",
     "BillingPeriodToCreate",
     "Contract",
     "ContractHistoryEntry",
+    "ContractPricings",
+    "ContractServicePricing",
     "ContractToCreate",
     "EvaluationError",
     "FeatureEvaluationResult",
+    "NewContractsPricing",
+    "PricingYaml",
     "Subscription",
     "UsageLevel",
     "UserContact",

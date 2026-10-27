@@ -75,3 +75,38 @@ def _describe(payload: Any) -> str:
             return str(message)
     text = str(payload).strip()
     return text[:500]
+
+
+class PricingYamlUnavailableError(SpaceApiError):
+    """Space knows the pricing version but cannot hand out its original file.
+
+    Raised by ``pricings.get_yaml`` on ``404 {"error": "PRICING_YAML_UNAVAILABLE"}``:
+    historical SPHERE-linked versions may survive only as parsed JSON. It is a
+    :class:`SpaceApiError`, so code that already catches refusals still does.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        payload: Any = None,
+        service_name: str = "",
+        pricing_version: str = "",
+    ):
+        super().__init__(status_code, method, path, payload)
+        self.service_name = service_name
+        self.pricing_version = pricing_version
+
+    @classmethod
+    def from_error(
+        cls, error: SpaceApiError, service_name: str, pricing_version: str
+    ) -> "PricingYamlUnavailableError":
+        return cls(
+            error.status_code,
+            error.method,
+            error.path,
+            error.payload,
+            service_name=service_name,
+            pricing_version=pricing_version,
+        )

@@ -133,10 +133,24 @@ class BaseSpaceClient:
     def _ws_url(self) -> str:
         return self._base_url.replace("http://", "ws://").replace("https://", "wss://")
 
-    def _refuse(self, response, method: str, path: str) -> None:
-        """Raise if Space refused, so a refusal is never mistaken for an answer."""
+    def _refuse(
+        self, response, method: str, path: str, accept: frozenset[int] = frozenset()
+    ) -> None:
+        """Raise if Space refused, so a refusal is never mistaken for an answer.
+
+        ``accept`` names statuses outside 2xx that are answers for this call,
+        such as ``304 Not Modified`` for a conditional read.
+        """
+        if response.status_code in accept:
+            return
         if response.status_code < 200 or response.status_code >= 300:
             raise SpaceApiError(response.status_code, method, path, _read_body(response))
+
+    def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        headers = {"x-api-key": self._api_key}
+        if extra:
+            headers.update(extra)
+        return headers
 
     @staticmethod
     def _decode(response) -> dict[str, Any] | list[Any] | None:

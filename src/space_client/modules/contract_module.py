@@ -4,7 +4,7 @@ from typing import Any
 
 from .. import _operations as operations
 from .._result import Result
-from ..types.models import Contract, ContractToCreate, Subscription
+from ..types.models import Contract, ContractPricings, ContractToCreate, Subscription
 from ._runner import AsyncRunner, SyncRunner
 
 
@@ -104,6 +104,25 @@ class _ContractCalls:
         """
         return self._run(operations.remove_contract(user_id))
 
+    def get_pricings(self, user_id: str) -> Result[ContractPricings]:
+        """Get the pricing version of every service of a user's contract.
+
+        Calls ``GET /contracts/{userId}/pricings``. Use it to render the pricing
+        page of a signed-in customer with the version of *their* contract; each
+        service also says which version new contracts get. Never cached.
+
+        Args:
+            user_id (str): User identifier.
+
+        Returns:
+            ContractPricings: Versions per service and the current
+            ``contract_version``.
+
+        Raises:
+            SpaceApiError: 404 when the contract is not in the caller's organisation.
+        """
+        return self._run(operations.get_contract_pricings(user_id))
+
     # Java compatibility aliases
     getContract = get_contract
     addContract = add_contract
@@ -111,6 +130,7 @@ class _ContractCalls:
     updateContractSubscriptionByGroupId = update_contract_subscription_by_group_id
     updateContractUsageLevels = update_contract_usage_levels
     removeContract = remove_contract
+    getPricings = get_pricings
 
 
 class ContractModule(_ContractCalls, SyncRunner):

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+from typing import Any
+
 import pytest
+
+from space_client import AsyncSpaceClient, SpaceClient
+from space_client.types import SpaceConnectionOptions
+
+SPACE_URL = "http://space.test"
+API_URL = f"{SPACE_URL}/api/v1"
 
 
 class FakeSocketClient:
@@ -48,3 +58,42 @@ def patch_socketio_client(monkeypatch):
 
     monkeypatch.setattr(client_module.socketio, "Client", FakeSocketClient)
     monkeypatch.setattr(async_client_module.socketio, "AsyncClient", FakeAsyncSocketClient)
+
+
+# -- A mocked Space over real HTTP -------------------------------------------
+#
+# The calls added for the subscription-change API depend on more than a JSON
+# body - status codes like 304 and 412, headers like ``ETag``, a YAML body - so
+# they are tested against httpx's own transport mocked by ``respx`` rather than
+# a hand-written ``request`` stub. No live Space is involved.
+#
+# ``flavour`` runs a test twice, once over ``SpaceClient`` and once over
+# ``AsyncSpaceClient``, and the ``call`` handed out with the client settles a
+# result either way: the two clients must behave the same, so the tests say so
+# once.
+
+
+@pytest.fixture(params=["sync", "async"])
+def flavour(request) -> str:
+    return request.param
+
+
+@pytest.fixture
+def space(flavour: str):
+    """``(client, call)`` for the requested flavour."""
+    loop = asyncio.new_event_loop() if flavour == "async" else None
+    options = SpaceConnectionOptions(url=SPACE_URL, api_key="org-key")
+    client: Any = AsyncSpaceClient(options) if flavour == "async" else SpaceClient(options)
+
+    def call(result: Any) -> Any:
+        if inspect.isawaitable(result):
+            assert loop is not None, "a sync call must not return an awaitable"
+            return loop.run_until_complete(result)
+        assert loop is None, "an async call must return an awaitable"
+        return result
+
+    yield client, call
+
+    call(client.close())
+    if loop is not None:
+        loop.close()

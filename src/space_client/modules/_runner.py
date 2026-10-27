@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .._operations import Operation
+from ..errors import SpaceApiError
 
 if TYPE_CHECKING:
     from .cache_module import CacheModule
@@ -46,6 +47,11 @@ class ModuleBase:
             return None
         return operation.cache_hit(self._cache)
 
+    def _refused(self, operation: Operation[Any], error: SpaceApiError) -> None:
+        """Give the operation a chance to say what a refusal means, then re-raise."""
+        if operation.on_refusal is not None:
+            operation.on_refusal(self._cache, error)
+
 
 class SyncRunner(ModuleBase):
     def _run(self, operation: Operation[T]) -> T:
@@ -53,16 +59,28 @@ class SyncRunner(ModuleBase):
         if cached is not None:
             return cached
 
-        if operation.no_content:
-            accepted = self._space_client._request_no_content(
-                operation.method, operation.path, json=operation.json
-            )
-            return operation.parse(self._cache, accepted)
-
-        payload = self._space_client._request_json(
-            operation.method, operation.path, json=operation.json
-        )
-        return operation.parse(self._cache, payload)
+        client = self._space_client
+        try:
+            if operation.raw:
+                answer = client._request_raw(
+                    operation.method,
+                    operation.path,
+                    json=operation.json,
+                    headers=operation.headers,
+                    accept=operation.accept,
+                )
+            elif operation.no_content:
+                answer = client._request_no_content(
+                    operation.method, operation.path, json=operation.json, headers=operation.headers
+                )
+            else:
+                answer = client._request_json(
+                    operation.method, operation.path, json=operation.json, headers=operation.headers
+                )
+        except SpaceApiError as error:
+            self._refused(operation, error)
+            raise
+        return operation.parse(self._cache, answer)
 
 
 class AsyncRunner(ModuleBase):
@@ -71,13 +89,25 @@ class AsyncRunner(ModuleBase):
         if cached is not None:
             return cached
 
-        if operation.no_content:
-            accepted = await self._space_client._request_no_content(
-                operation.method, operation.path, json=operation.json
-            )
-            return operation.parse(self._cache, accepted)
-
-        payload = await self._space_client._request_json(
-            operation.method, operation.path, json=operation.json
-        )
-        return operation.parse(self._cache, payload)
+        client = self._space_client
+        try:
+            if operation.raw:
+                answer = await client._request_raw(
+                    operation.method,
+                    operation.path,
+                    json=operation.json,
+                    headers=operation.headers,
+                    accept=operation.accept,
+                )
+            elif operation.no_content:
+                answer = await client._request_no_content(
+                    operation.method, operation.path, json=operation.json, headers=operation.headers
+                )
+            else:
+                answer = await client._request_json(
+                    operation.method, operation.path, json=operation.json, headers=operation.headers
+                )
+        except SpaceApiError as error:
+            self._refused(operation, error)
+            raise
+        return operation.parse(self._cache, answer)

@@ -30,6 +30,8 @@ Python client library for [Space](https://github.com/isa-group/space), a pricing
 - Feature evaluation with optional expected consumption.
 - Revert operation for optimistic usage updates.
 - Pricing token generation.
+- Pricing reads for pricing pages: the raw Pricing2Yaml of a version, the
+  versions of a user's contract, and the version new contracts get.
 - Built-in in-memory cache and optional Redis cache.
 - WebSocket events for real-time pricing updates.
 
@@ -175,6 +177,8 @@ Main entry point. Exposes modules as public fields:
 
 - `contracts`
 - `features`
+- `pricings`
+- `services`
 - `cache`
 
 Core methods:
@@ -208,8 +212,48 @@ local registry. Supports `async with`.
 | `update_contract_subscription_by_group_id(group_id, new_subscription)` | `list[Contract] | None` |
 | `update_contract_usage_levels(user_id, service_name, usage_levels_novations)` | `Contract | None` |
 | `remove_contract(user_id)` | `None` |
+| `get_pricings(user_id)` | `ContractPricings` |
 
 Java-style aliases are also available (`getContract`, `addContract`, etc.).
+
+### PricingModule
+
+| Method | Returns |
+|---|---|
+| `get_yaml(service_name, pricing_version, etag=None)` | `PricingYaml` |
+
+### ServiceModule
+
+| Method | Returns |
+|---|---|
+| `get_new_contracts_pricing(service_name)` | `NewContractsPricing` |
+
+### Pricing pages
+
+A host backend renders a pricing page with the version a visitor would get, or
+with the version a signed-in customer is on:
+
+```python
+# Signed-out visitor: the version SPACE assigns to new contracts.
+current = client.services.get_new_contracts_pricing("acme")
+pricing = client.pricings.get_yaml("acme", current.version)
+print(current.source)  # "sphere-policy" | "default" | "latest-active"
+
+# Signed-in customer: the version of THEIR contract.
+mine = client.contracts.get_pricings("user-123")
+acme = mine.services["acme"]
+print(acme.version, acme.status, acme.plan, acme.add_ons, acme.new_contracts_version)
+pricing = client.pricings.get_yaml("acme", acme.version)
+
+# The file is returned byte for byte; keep its ETag to revalidate cheaply.
+again = client.pricings.get_yaml("acme", acme.version, etag=pricing.etag)
+if again.not_modified:
+	...  # reuse pricing.yaml
+```
+
+`get_yaml` raises `PricingYamlUnavailableError` (a `SpaceApiError`) when Space
+knows the version but no longer has its original file. `get_pricings` is never
+served from cache: its `contract_version` matters only while it is current.
 
 ### FeatureModule
 
@@ -228,6 +272,7 @@ Main model classes are exported from `space_client.types`:
 - `SpaceConnectionOptions`
 - `CacheOptions`, `CacheType`, `ExternalCacheConfig`, `RedisConfig`
 - `Contract`, `ContractToCreate`, `Subscription`
+- `PricingYaml`, `ContractPricings`, `ContractServicePricing`, `NewContractsPricing`
 - `FeatureEvaluationResult`, `EvaluationError`
 - `BillingPeriod`, `BillingPeriodToCreate`, `ContractHistoryEntry`, `UsageLevel`, `UserContact`
 - `SpaceEvent`
@@ -299,6 +344,8 @@ client.connect()
 - A request Space refused raises `SpaceApiError`, carrying the status code, the
   method and path, and whatever body came back.
 - A request that never arrived raises `SpaceConnectionError`.
+- `pricings.get_yaml(...)` raises `PricingYamlUnavailableError`, a subclass of
+  `SpaceApiError`, when Space cannot provide the original Pricing2Yaml file.
 - `FeatureModule.evaluate(...)` returns an object containing `error` when Space
   answers successfully with something that is not a usable evaluation.
 
@@ -312,6 +359,11 @@ Run tests locally:
 pip install -e .[dev]
 pytest
 ```
+
+Tests never reach a live Space: the older ones stub the HTTP client, the
+subscription-change ones mock httpx's transport with
+[respx](https://lundberg.github.io/respx/) and run against both the sync and the
+async client.
 
 CI executes tests on every pull request for Python `3.10`, `3.11`, and `3.12`.
 
