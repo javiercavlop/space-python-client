@@ -367,7 +367,7 @@ Main model classes are exported from `space_client.types`:
 - `PricingYaml`, `ContractPricings`, `ContractServicePricing`, `NewContractsPricing`
 - `NovationPreview`, `NovationError`, `NovationErrorCode`, `NovationVersionChange`,
   `NovationUsageWarning`, `NovationBillingPeriod`
-- `PricingTokenPayload`, `PricingTokenSubscription`, `decode_pricing_token`
+- `PricingTokenPayload`, `PricingTokenSubscription`, `decode_pricing_token`, `pricing_token_user_id`
 - `FeatureEvaluationResult`, `EvaluationError`
 - `BillingPeriod`, `BillingPeriodToCreate`, `ContractHistoryEntry`, `UsageLevel`, `UserContact`
 - `SpaceEvent`
@@ -486,6 +486,37 @@ if payload.subscription is not None:  # None for tokens from older Space version
 
 `decode_pricing_token` does **not** verify the signature: use it to read a token
 you just received from Space, never to authenticate one a client sent you.
+
+### Token claims: `userId`, `organizationId`, `aud`, `iss`
+
+A userId is unique only within its organization, so Space versions with
+per-organization userIds (capability `contract-userid-per-org`) issue tokens
+with these claims:
+
+| Claim | `PricingTokenPayload` | Value |
+| --- | --- | --- |
+| `sub` | `sub` | `urn:space:<organizationId>:<percent-encoded userId>`. Opaque: do not parse it. |
+| `userId` | `user_id` | The userId as stored in Space (not encoded). |
+| `organizationId` | `organization_id` | The organization of the contract. |
+| `aud` | `aud` | The organization the token is for (same value as `organizationId`). |
+| `iss` | `iss` | The Space server: its `JWT_ISSUER`, `space` by default. |
+
+Tokens of older Space versions only have the bare userId in `sub`; the other
+fields are then `None`. `pricing_token_user_id(payload)` returns `user_id` and
+falls back to `sub` only when the token has no `userId` claim (an older
+server); it never parses the URN. Code that used `payload.sub` as the userId
+should switch to it:
+
+```python
+from space_client.types import decode_pricing_token, pricing_token_user_id
+
+payload = decode_pricing_token(token)
+user_id = pricing_token_user_id(payload)
+```
+
+When a token is checked on the server side, also compare `organization_id` (or
+`aud`) with your organization: the same userId can exist in another
+organization of the same Space.
 
 ## Error Handling
 

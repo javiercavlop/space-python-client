@@ -21,7 +21,12 @@ from .models import (
     UsageLevel,
     UserContact,
 )
-from .pricing_token import PricingTokenPayload, PricingTokenSubscription, decode_pricing_token
+from .pricing_token import (
+    PricingTokenPayload,
+    PricingTokenSubscription,
+    decode_pricing_token,
+    pricing_token_user_id,
+)
 from .space_connection_options import SpaceConnectionOptions
 from .space_event import SpaceEvent
 
@@ -55,4 +60,5 @@ __all__ = [
     "UsageLevel",
     "UserContact",
     "decode_pricing_token",
+    "pricing_token_user_id",
 ]
