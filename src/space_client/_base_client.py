@@ -84,6 +84,7 @@ class BaseSpaceClient:
         self._base_url = options.url.rstrip("/")
         self._http_url = f"{self._base_url}/api/v1"
         self._api_key = options.api_key
+        self._organization_id = getattr(options, "organization_id", None)
         self._timeout = options.timeout
         self._callbacks: dict[str, Callable[[Any], None]] = {}
         # The capabilities last advertised by Space, and when (see S0).
@@ -162,7 +163,8 @@ class BaseSpaceClient:
         """What ``socket.connect`` is called with.
 
         ``/contracts`` only answers authenticated callers: the API key goes in
-        the Socket.IO ``auth`` payload and, for servers that read the
+        the Socket.IO ``auth`` payload (with ``organizationId`` when one is
+        configured, as member user keys need) and, for servers that read the
         handshake, the ``x-api-key`` header. ``/pricings`` stays anonymous
         unless contracts are wanted too, since both share one connection.
         """
@@ -173,7 +175,11 @@ class BaseSpaceClient:
             "wait": False,
         }
         if CONTRACTS_NAMESPACE in namespaces:
-            arguments["auth"] = {"apiKey": self._api_key}
+            auth = {"apiKey": self._api_key}
+            if self._organization_id:
+                # Member user keys act in an organisation they name.
+                auth["organizationId"] = self._organization_id
+            arguments["auth"] = auth
             arguments["headers"] = {"x-api-key": self._api_key}
         return arguments
 

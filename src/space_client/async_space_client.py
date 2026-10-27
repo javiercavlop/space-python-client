@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Any, Callable
 
 import httpx
 import socketio
@@ -14,6 +15,8 @@ from .modules.feature_module import AsyncFeatureModule
 from .modules.pricing_module import AsyncPricingModule
 from .modules.service_module import AsyncServiceModule
 from .types.space_connection_options import SpaceConnectionOptions
+
+logger = logging.getLogger("space_client")
 
 
 class AsyncSpaceClient(BaseSpaceClient):
@@ -71,6 +74,33 @@ class AsyncSpaceClient(BaseSpaceClient):
             reconnection=True, logger=False, engineio_logger=False
         )
         self._configure_socket_handlers()
+
+    def on(self, event: str, callback: Callable[[Any], None]) -> None:
+        """Register an event listener callback.
+
+        ``on`` cannot await, so a contract listener registered while the
+        socket is connected without ``/contracts`` only takes effect at the
+        next ``await client.connect()``; a warning is logged then. Register
+        contract listeners before connecting to avoid it.
+
+        Args:
+            event (str): Event name (see :meth:`BaseSpaceClient.on`).
+            callback (Callable[[Any], None]): Function invoked with event payload.
+
+        Returns:
+            None: Listener registration updates internal callback registry.
+        """
+        super().on(event, callback)
+        if (
+            event.lower() in self._CONTRACT_EVENTS
+            and self._socket_namespaces
+            and not self._socket_is_current()
+        ):
+            logger.warning(
+                "Contract listener %r registered after connect(): call `await client.connect()` "
+                "again to join /contracts, or register contract listeners before connecting",
+                event,
+            )
 
     async def is_connected_to_space(self) -> bool:
         """Check Space health endpoint availability.

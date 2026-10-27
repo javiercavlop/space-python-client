@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -71,6 +72,39 @@ def test_registering_a_contract_listener_opens_the_authenticated_contracts_names
     calls = len(client._socket.connect_calls)
     client.on("contract_created", received.append)
     assert len(client._socket.connect_calls) == calls
+    client.close()
+
+
+def test_a_member_user_key_sends_its_organization_with_the_handshake():
+    client = SpaceClient(options(organization_id="org-1"))
+    assert client._socket.connect_calls[-1].get("auth") is None  # /pricings stays anonymous
+
+    client.on("contract_novated", lambda _d: None)
+
+    last = client._socket.connect_calls[-1]
+    assert last["auth"] == {"apiKey": "org-key", "organizationId": "org-1"}
+    assert last["headers"] == {"x-api-key": "org-key"}
+    client.close()
+
+
+def test_an_org_key_without_organization_sends_only_the_key():
+    client = SpaceClient(options())
+    client.on("contract_novated", lambda _d: None)
+    assert client._socket.connect_calls[-1]["auth"] == {"apiKey": "org-key"}
+    client.close()
+
+
+def test_a_deletion_carries_a_null_contract_version():
+    client = SpaceClient(options(cache=CacheOptions(enabled=True)))
+    client.cache.set(client.cache.get_contract_key("u1"), {"x": 1})
+    deleted: list[Any] = []
+    client.on("contract_deleted", deleted.append)
+    details = {**CONTRACT_EVENT["details"], "contractVersion": None}
+
+    client._socket.trigger("message", {"code": "CONTRACT_DELETED", "details": details}, namespace="/contracts")
+
+    assert deleted == [details] and deleted[0]["contractVersion"] is None
+    assert client.cache.get(client.cache.get_contract_key("u1")) is None
     client.close()
 
 
@@ -146,6 +180,30 @@ def test_async_client_reconnects_on_connect_when_contract_listeners_were_added_l
         await client.close()
 
     asyncio.run(scenario())
+
+
+def test_async_on_after_connect_warns_that_connect_must_be_called_again(caplog):
+    client = AsyncSpaceClient(options())
+
+    async def scenario():
+        client.on("contract_created", lambda _d: None)  # before connecting: no warning
+        assert not caplog.records
+        await client.connect()
+        with caplog.at_level(logging.WARNING, logger="space_client"):
+            client.on("contract_novated", lambda _d: None)  # already in /contracts: fine
+            assert not caplog.records
+        await client.disconnect()
+        client.remove_all_listeners()
+        await client.connect()
+        with caplog.at_level(logging.WARNING, logger="space_client"):
+            client.on("contract_novated", lambda _d: None)
+            client.on("pricing_created", lambda _d: None)  # not a contract event
+        await client.close()
+
+    asyncio.run(scenario())
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "await client.connect()" in warnings[0].getMessage()
 
 
 # -- S7: the subscription in a pricing token ---------------------------------

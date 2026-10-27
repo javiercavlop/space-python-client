@@ -439,11 +439,15 @@ client.connect()
 Contract events arrive on the authenticated `/contracts` namespace, and only for
 contracts of the API key's organisation. The client joins it (sending the key as
 Socket.IO `auth: {"apiKey": ...}` and as the `x-api-key` header) once a contract
-listener is registered:
+listener is registered. A member user key (`usr_...`) also has to name its
+organisation: pass `SpaceConnectionOptions(..., organization_id="org-1")` and the
+handshake sends `auth: {"apiKey": ..., "organizationId": "org-1"}`. Organisation
+keys need nothing more.
 
 ```python
 def on_novated(details):
 	# {"userId", "organizationId", "contractVersion", "services": [...]}
+	# contractVersion is a string, or None for contract_deleted.
 	print("Contract changed:", details["userId"], details["contractVersion"])
 
 
@@ -453,10 +457,13 @@ client.on("contract_novated", on_novated)
 - The cached entries of `details["userId"]` are invalidated before the callback
   runs, so a callback that re-reads the contract or a pricing token gets fresh
   data.
-- The sync client reconnects its socket to add the namespace when the first
-  contract listener is registered. `AsyncSpaceClient.on` cannot await, so
-  register contract listeners before `connect()` / `async with`, or call
-  `await client.connect()` again afterwards.
+- **Register contract listeners before connecting.** python-socketio joins
+  namespaces only when it connects, so adding the first contract listener to a
+  connected sync client disconnects and reconnects the socket. `/pricings`
+  events sent during that short window are lost, and `synchronized` fires
+  again on reconnection. `AsyncSpaceClient.on` cannot await: a contract listener
+  added after `connect()` only takes effect at the next `await client.connect()`,
+  and the client logs a warning (logger `space_client`) to say so.
 - A key Space refuses on `/contracts` is reported to the `error` listener.
 - Removing the last contract listener does not close the namespace; its events
   are simply dropped until a listener is registered again.
